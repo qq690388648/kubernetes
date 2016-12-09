@@ -28,11 +28,12 @@ import (
 
 	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/apis/extensions"
+	"k8s.io/kubernetes/pkg/api/v1"
+	extensions "k8s.io/kubernetes/pkg/apis/extensions/v1beta1"
+	metav1 "k8s.io/kubernetes/pkg/apis/meta/v1"
 	"k8s.io/kubernetes/pkg/client/cache"
-	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	unversionedcore "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/core/unversioned"
+	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/release_1_5"
+	v1core "k8s.io/kubernetes/pkg/client/clientset_generated/release_1_5/typed/core/v1"
 	"k8s.io/kubernetes/pkg/client/record"
 	"k8s.io/kubernetes/pkg/controller"
 	"k8s.io/kubernetes/pkg/controller/deployment/util"
@@ -84,6 +85,8 @@ type DeploymentController struct {
 
 	// Deployments that need to be synced
 	queue workqueue.RateLimitingInterface
+	// Deployments that need to be checked for progress.
+	progressQueue workqueue.RateLimitingInterface
 }
 
 // NewDeploymentController creates a new DeploymentController.
@@ -91,22 +94,23 @@ func NewDeploymentController(dInformer informers.DeploymentInformer, rsInformer 
 	eventBroadcaster := record.NewBroadcaster()
 	eventBroadcaster.StartLogging(glog.Infof)
 	// TODO: remove the wrapper when every clients have moved to use the clientset.
-	eventBroadcaster.StartRecordingToSink(&unversionedcore.EventSinkImpl{Interface: client.Core().Events("")})
+	eventBroadcaster.StartRecordingToSink(&v1core.EventSinkImpl{Interface: client.Core().Events("")})
 
 	if client != nil && client.Core().RESTClient().GetRateLimiter() != nil {
 		metrics.RegisterMetricAndTrackRateLimiterUsage("deployment_controller", client.Core().RESTClient().GetRateLimiter())
 	}
 	dc := &DeploymentController{
 		client:        client,
-		eventRecorder: eventBroadcaster.NewRecorder(api.EventSource{Component: "deployment-controller"}),
+		eventRecorder: eventBroadcaster.NewRecorder(v1.EventSource{Component: "deployment-controller"}),
 		queue:         workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "deployment"),
+		progressQueue: workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "progress-check"),
 	}
 
 	dInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-		AddFunc:    dc.addDeploymentNotification,
-		UpdateFunc: dc.updateDeploymentNotification,
+		AddFunc:    dc.addDeployment,
+		UpdateFunc: dc.updateDeployment,
 		// This will enter the sync loop and no-op, because the deployment has been deleted from the store.
-		DeleteFunc: dc.deleteDeploymentNotification,
+		DeleteFunc: dc.deleteDeployment,
 	})
 	rsInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    dc.addReplicaSet,
@@ -128,6 +132,7 @@ func NewDeploymentController(dInformer informers.DeploymentInformer, rsInformer 
 func (dc *DeploymentController) Run(workers int, stopCh <-chan struct{}) {
 	defer utilruntime.HandleCrash()
 	defer dc.queue.ShutDown()
+	defer dc.progressQueue.ShutDown()
 
 	glog.Infof("Starting deployment controller")
 
@@ -138,25 +143,26 @@ func (dc *DeploymentController) Run(workers int, stopCh <-chan struct{}) {
 	for i := 0; i < workers; i++ {
 		go wait.Until(dc.worker, time.Second, stopCh)
 	}
+	go wait.Until(dc.progressWorker, time.Second, stopCh)
 
 	<-stopCh
 	glog.Infof("Shutting down deployment controller")
 }
 
-func (dc *DeploymentController) addDeploymentNotification(obj interface{}) {
+func (dc *DeploymentController) addDeployment(obj interface{}) {
 	d := obj.(*extensions.Deployment)
 	glog.V(4).Infof("Adding deployment %s", d.Name)
 	dc.enqueueDeployment(d)
 }
 
-func (dc *DeploymentController) updateDeploymentNotification(old, cur interface{}) {
+func (dc *DeploymentController) updateDeployment(old, cur interface{}) {
 	oldD := old.(*extensions.Deployment)
 	glog.V(4).Infof("Updating deployment %s", oldD.Name)
 	// Resync on deployment object relist.
 	dc.enqueueDeployment(cur.(*extensions.Deployment))
 }
 
-func (dc *DeploymentController) deleteDeploymentNotification(obj interface{}) {
+func (dc *DeploymentController) deleteDeployment(obj interface{}) {
 	d, ok := obj.(*extensions.Deployment)
 	if !ok {
 		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
@@ -265,46 +271,37 @@ func (dc *DeploymentController) enqueueDeployment(deployment *extensions.Deploym
 	dc.queue.Add(key)
 }
 
-func (dc *DeploymentController) markDeploymentOverlap(deployment *extensions.Deployment, withDeployment string) (*extensions.Deployment, error) {
-	if deployment.Annotations[util.OverlapAnnotation] == withDeployment {
-		return deployment, nil
+// enqueueAfter will enqueue a deployment after the provided amount of time in a secondary queue.
+// Once the deployment is popped out of the secondary queue, it is checked for progress and requeued
+// back to the main queue iff it has failed progressing.
+func (dc *DeploymentController) enqueueAfter(deployment *extensions.Deployment, after time.Duration) {
+	key, err := controller.KeyFunc(deployment)
+	if err != nil {
+		utilruntime.HandleError(fmt.Errorf("Couldn't get key for object %#v: %v", deployment, err))
+		return
 	}
-	if deployment.Annotations == nil {
-		deployment.Annotations = make(map[string]string)
-	}
-	deployment.Annotations[util.OverlapAnnotation] = withDeployment
-	return dc.client.Extensions().Deployments(deployment.Namespace).Update(deployment)
-}
 
-func (dc *DeploymentController) clearDeploymentOverlap(deployment *extensions.Deployment) (*extensions.Deployment, error) {
-	if len(deployment.Annotations[util.OverlapAnnotation]) == 0 {
-		return deployment, nil
-	}
-	delete(deployment.Annotations, util.OverlapAnnotation)
-	return dc.client.Extensions().Deployments(deployment.Namespace).Update(deployment)
+	dc.progressQueue.AddAfter(key, after)
 }
 
 // worker runs a worker thread that just dequeues items, processes them, and marks them done.
 // It enforces that the syncHandler is never invoked concurrently with the same key.
 func (dc *DeploymentController) worker() {
-	work := func() bool {
-		key, quit := dc.queue.Get()
-		if quit {
-			return true
-		}
-		defer dc.queue.Done(key)
+	for dc.processNextWorkItem() {
+	}
+}
 
-		err := dc.syncHandler(key.(string))
-		dc.handleErr(err, key)
-
+func (dc *DeploymentController) processNextWorkItem() bool {
+	key, quit := dc.queue.Get()
+	if quit {
 		return false
 	}
+	defer dc.queue.Done(key)
 
-	for {
-		if quit := work(); quit {
-			return
-		}
-	}
+	err := dc.syncHandler(key.(string))
+	dc.handleErr(err, key)
+
+	return true
 }
 
 func (dc *DeploymentController) handleErr(err error, key interface{}) {
@@ -320,6 +317,7 @@ func (dc *DeploymentController) handleErr(err error, key interface{}) {
 	}
 
 	utilruntime.HandleError(err)
+	glog.V(2).Infof("Dropping deployment %q out of the queue: %v", key, err)
 	dc.queue.Forget(key)
 }
 
@@ -327,6 +325,7 @@ func (dc *DeploymentController) handleErr(err error, key interface{}) {
 // This function is not meant to be invoked concurrently with the same key.
 func (dc *DeploymentController) syncDeployment(key string) error {
 	startTime := time.Now()
+	glog.V(4).Infof("Started syncing deployment %q (%v)", key, startTime)
 	defer func() {
 		glog.V(4).Infof("Finished syncing deployment %q (%v)", key, time.Now().Sub(startTime))
 	}()
@@ -342,17 +341,21 @@ func (dc *DeploymentController) syncDeployment(key string) error {
 	}
 
 	deployment := obj.(*extensions.Deployment)
-	everything := unversioned.LabelSelector{}
-	if reflect.DeepEqual(deployment.Spec.Selector, &everything) {
-		dc.eventRecorder.Eventf(deployment, api.EventTypeWarning, "SelectingAll", "This deployment is selecting all pods. A non-empty selector is required.")
-		return nil
-	}
-
 	// Deep-copy otherwise we are mutating our cache.
 	// TODO: Deep-copy only when needed.
 	d, err := util.DeploymentDeepCopy(deployment)
 	if err != nil {
 		return err
+	}
+
+	everything := metav1.LabelSelector{}
+	if reflect.DeepEqual(d.Spec.Selector, &everything) {
+		dc.eventRecorder.Eventf(d, v1.EventTypeWarning, "SelectingAll", "This deployment is selecting all pods. A non-empty selector is required.")
+		if d.Status.ObservedGeneration < d.Generation {
+			d.Status.ObservedGeneration = d.Generation
+			dc.client.Extensions().Deployments(d.Namespace).UpdateStatus(d)
+		}
+		return nil
 	}
 
 	if d.DeletionTimestamp != nil {
@@ -361,9 +364,24 @@ func (dc *DeploymentController) syncDeployment(key string) error {
 
 	// Handle overlapping deployments by deterministically avoid syncing deployments that fight over ReplicaSets.
 	if err = dc.handleOverlap(d); err != nil {
-		dc.eventRecorder.Eventf(deployment, api.EventTypeWarning, "SelectorOverlap", err.Error())
+		dc.eventRecorder.Eventf(d, v1.EventTypeWarning, "SelectorOverlap", err.Error())
 		return nil
 	}
+
+	// Update deployment conditions with an Unknown condition when pausing/resuming
+	// a deployment. In this way, we can be sure that we won't timeout when a user
+	// resumes a Deployment with a set progressDeadlineSeconds.
+	if err = dc.checkPausedConditions(d); err != nil {
+		return err
+	}
+
+	_, err = dc.hasFailed(d)
+	if err != nil {
+		return err
+	}
+	// TODO: Automatically rollback here if we failed above. Locate the last complete
+	// revision and populate the rollback spec with it.
+	// See https://github.com/kubernetes/kubernetes/issues/23211.
 
 	if d.Spec.Paused {
 		return dc.sync(d)
@@ -397,33 +415,31 @@ func (dc *DeploymentController) syncDeployment(key string) error {
 // the newer overlapping ones (only sync the oldest one). New/old is determined by when the
 // deployment's selector is last updated.
 func (dc *DeploymentController) handleOverlap(d *extensions.Deployment) error {
-	selector, err := unversioned.LabelSelectorAsSelector(d.Spec.Selector)
-	if err != nil {
-		return fmt.Errorf("deployment %s/%s has invalid label selector: %v", d.Namespace, d.Name, err)
-	}
 	deployments, err := dc.dLister.Deployments(d.Namespace).List(labels.Everything())
 	if err != nil {
 		return fmt.Errorf("error listing deployments in namespace %s: %v", d.Namespace, err)
 	}
 	overlapping := false
 	for _, other := range deployments {
-		if !selector.Empty() && selector.Matches(labels.Set(other.Spec.Template.Labels)) && d.UID != other.UID {
+		foundOverlaps, err := util.OverlapsWith(d, other)
+		if err != nil {
+			return err
+		}
+		if foundOverlaps {
 			deploymentCopy, err := util.DeploymentDeepCopy(other)
 			if err != nil {
 				return err
 			}
 			overlapping = true
-			// We don't care if the overlapping annotation update failed or not (we don't make decision on it)
-			d, _ = dc.markDeploymentOverlap(d, other.Name)
-			deploymentCopy, _ = dc.markDeploymentOverlap(deploymentCopy, d.Name)
-			// Skip syncing this one if older overlapping one is found
-			// TODO: figure out a better way to determine which deployment to skip,
-			// either with controller reference, or with validation.
-			// Using oldest active replica set to determine which deployment to skip wouldn't make much difference,
-			// since new replica set hasn't been created after selector update
+			// Skip syncing this one if older overlapping one is found.
 			if util.SelectorUpdatedBefore(deploymentCopy, d) {
-				return fmt.Errorf("found deployment %s/%s has overlapping selector with an older deployment %s/%s, skip syncing it", d.Namespace, d.Name, other.Namespace, other.Name)
+				// We don't care if the overlapping annotation update failed or not (we don't make decision on it)
+				dc.markDeploymentOverlap(d, deploymentCopy.Name)
+				dc.clearDeploymentOverlap(deploymentCopy)
+				return fmt.Errorf("found deployment %s/%s has overlapping selector with an older deployment %s/%s, skip syncing it", d.Namespace, d.Name, deploymentCopy.Namespace, deploymentCopy.Name)
 			}
+			dc.markDeploymentOverlap(deploymentCopy, d.Name)
+			d, _ = dc.clearDeploymentOverlap(d)
 		}
 	}
 	if !overlapping {
@@ -431,4 +447,79 @@ func (dc *DeploymentController) handleOverlap(d *extensions.Deployment) error {
 		d, _ = dc.clearDeploymentOverlap(d)
 	}
 	return nil
+}
+
+func (dc *DeploymentController) markDeploymentOverlap(deployment *extensions.Deployment, withDeployment string) (*extensions.Deployment, error) {
+	if deployment.Annotations[util.OverlapAnnotation] == withDeployment && deployment.Status.ObservedGeneration >= deployment.Generation {
+		return deployment, nil
+	}
+	if deployment.Annotations == nil {
+		deployment.Annotations = make(map[string]string)
+	}
+	// Update observedGeneration for overlapping deployments so that their deletion won't be blocked.
+	deployment.Status.ObservedGeneration = deployment.Generation
+	deployment.Annotations[util.OverlapAnnotation] = withDeployment
+	return dc.client.Extensions().Deployments(deployment.Namespace).UpdateStatus(deployment)
+}
+
+func (dc *DeploymentController) clearDeploymentOverlap(deployment *extensions.Deployment) (*extensions.Deployment, error) {
+	if len(deployment.Annotations[util.OverlapAnnotation]) == 0 {
+		return deployment, nil
+	}
+	delete(deployment.Annotations, util.OverlapAnnotation)
+	return dc.client.Extensions().Deployments(deployment.Namespace).UpdateStatus(deployment)
+}
+
+// progressWorker runs a worker thread that pops items out of a secondary queue, checks if they
+// have failed progressing and if so it adds them back to the main queue.
+func (dc *DeploymentController) progressWorker() {
+	for dc.checkNextItemForProgress() {
+	}
+}
+
+// checkNextItemForProgress checks if a deployment has failed progressing and if so it adds it back
+// to the main queue.
+func (dc *DeploymentController) checkNextItemForProgress() bool {
+	key, quit := dc.progressQueue.Get()
+	if quit {
+		return false
+	}
+	defer dc.progressQueue.Done(key)
+
+	needsResync, err := dc.checkForProgress(key.(string))
+	if err != nil {
+		utilruntime.HandleError(err)
+	}
+	if err == nil && needsResync {
+		dc.queue.AddRateLimited(key)
+	}
+	dc.progressQueue.Forget(key)
+	return true
+}
+
+// checkForProgress checks the progress for the provided deployment. Meant to be called
+// by the progressWorker and work on items synced in a secondary queue.
+func (dc *DeploymentController) checkForProgress(key string) (bool, error) {
+	obj, exists, err := dc.dLister.Indexer.GetByKey(key)
+	if err != nil {
+		glog.V(2).Infof("Cannot retrieve deployment %q found in the secondary queue: %#v", key, err)
+		return false, err
+	}
+	if !exists {
+		return false, nil
+	}
+	deployment := obj.(*extensions.Deployment)
+	cond := util.GetDeploymentCondition(deployment.Status, extensions.DeploymentProgressing)
+	// Already marked with a terminal reason - no need to add it back to the main queue.
+	if cond != nil && (cond.Reason == util.TimedOutReason || cond.Reason == util.NewRSAvailableReason) {
+		return false, nil
+	}
+	// Deep-copy otherwise we may mutate our cache.
+	// TODO: Remove deep-copying from here. This worker does not need to sync the annotations
+	// in the deployment.
+	d, err := util.DeploymentDeepCopy(deployment)
+	if err != nil {
+		return false, err
+	}
+	return dc.hasFailed(d)
 }

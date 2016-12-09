@@ -20,18 +20,24 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sync"
 	"time"
 
 	"k8s.io/kubernetes/pkg/api"
 	apierrs "k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/api/resource"
-	"k8s.io/kubernetes/pkg/api/unversioned"
-	"k8s.io/kubernetes/pkg/apis/extensions"
-	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
+	"k8s.io/kubernetes/pkg/api/v1"
+	extensionsinternal "k8s.io/kubernetes/pkg/apis/extensions"
+	extensions "k8s.io/kubernetes/pkg/apis/extensions/v1beta1"
+	metav1 "k8s.io/kubernetes/pkg/apis/meta/v1"
+	"k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
+	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/release_1_5"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/kubernetes/pkg/runtime/schema"
 	"k8s.io/kubernetes/pkg/util/sets"
 	"k8s.io/kubernetes/pkg/util/uuid"
+	"k8s.io/kubernetes/pkg/util/workqueue"
 
 	"github.com/golang/glog"
 )
@@ -41,8 +47,21 @@ const (
 	nonExist = "NonExist"
 )
 
+type RunObjectConfig interface {
+	Run() error
+	GetName() string
+	GetNamespace() string
+	GetKind() schema.GroupKind
+	GetClient() clientset.Interface
+	GetInternalClient() internalclientset.Interface
+	SetClient(clientset.Interface)
+	SetInternalClient(internalclientset.Interface)
+	GetReplicas() int
+}
+
 type RCConfig struct {
 	Client         clientset.Interface
+	InternalClient internalclientset.Interface
 	Image          string
 	Command        []string
 	Name           string
@@ -55,8 +74,8 @@ type RCConfig struct {
 	CpuLimit       int64 // millicores
 	MemRequest     int64 // bytes
 	MemLimit       int64 // bytes
-	ReadinessProbe *api.Probe
-	DNSPolicy      *api.DNSPolicy
+	ReadinessProbe *v1.Probe
+	DNSPolicy      *v1.DNSPolicy
 
 	// Env vars, set the same for every pod.
 	Env map[string]string
@@ -72,12 +91,12 @@ type RCConfig struct {
 	// Ports to declare in the container as host and container ports.
 	HostPorts map[string]int
 
-	Volumes      []api.Volume
-	VolumeMounts []api.VolumeMount
+	Volumes      []v1.Volume
+	VolumeMounts []v1.VolumeMount
 
 	// Pointer to a list of pods; if non-nil, will be set to a list of pods
 	// created by this RC by RunRC.
-	CreatedPods *[]*api.Pod
+	CreatedPods *[]*v1.Pod
 
 	// Maximum allowable container failures. If exceeded, RunRC returns an error.
 	// Defaults to replicas*0.1 if unspecified.
@@ -92,6 +111,9 @@ type RCConfig struct {
 	// kubelets are running those variables should be nil.
 	NodeDumpFunc      func(c clientset.Interface, nodeNames []string, logFunc func(fmt string, args ...interface{}))
 	ContainerDumpFunc func(c clientset.Interface, ns string, logFunc func(ftm string, args ...interface{}))
+
+	// Names of the secrets to mount
+	SecretNames []string
 }
 
 func (rc *RCConfig) RCConfigLog(fmt string, args ...interface{}) {
@@ -157,7 +179,7 @@ func (p PodDiff) String(ignorePhases sets.String) string {
 }
 
 // Diff computes a PodDiff given 2 lists of pods.
-func Diff(oldPods []*api.Pod, curPods []*api.Pod) PodDiff {
+func Diff(oldPods []*v1.Pod, curPods []*v1.Pod) PodDiff {
 	podInfoMap := PodDiff{}
 
 	// New pods will show up in the curPods list but not in oldPods. They have oldhostname/phase == nonexist.
@@ -188,34 +210,46 @@ func RunDeployment(config DeploymentConfig) error {
 	return config.start()
 }
 
+func (config *DeploymentConfig) Run() error {
+	return RunDeployment(*config)
+}
+
+func (config *DeploymentConfig) GetKind() schema.GroupKind {
+	return extensionsinternal.Kind("Deployment")
+}
+
 func (config *DeploymentConfig) create() error {
 	deployment := &extensions.Deployment{
-		ObjectMeta: api.ObjectMeta{
+		ObjectMeta: v1.ObjectMeta{
 			Name: config.Name,
 		},
 		Spec: extensions.DeploymentSpec{
-			Replicas: int32(config.Replicas),
-			Selector: &unversioned.LabelSelector{
+			Replicas: func(i int) *int32 { x := int32(i); return &x }(config.Replicas),
+			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					"name": config.Name,
 				},
 			},
-			Template: api.PodTemplateSpec{
-				ObjectMeta: api.ObjectMeta{
+			Template: v1.PodTemplateSpec{
+				ObjectMeta: v1.ObjectMeta{
 					Labels: map[string]string{"name": config.Name},
 				},
-				Spec: api.PodSpec{
-					Containers: []api.Container{
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{
 						{
 							Name:    config.Name,
 							Image:   config.Image,
 							Command: config.Command,
-							Ports:   []api.ContainerPort{{ContainerPort: 80}},
+							Ports:   []v1.ContainerPort{{ContainerPort: 80}},
 						},
 					},
 				},
 			},
 		},
+	}
+
+	if len(config.SecretNames) > 0 {
+		attachSecrets(&deployment.Spec.Template, config.SecretNames)
 	}
 
 	config.applyTo(&deployment.Spec.Template)
@@ -240,34 +274,46 @@ func RunReplicaSet(config ReplicaSetConfig) error {
 	return config.start()
 }
 
+func (config *ReplicaSetConfig) Run() error {
+	return RunReplicaSet(*config)
+}
+
+func (config *ReplicaSetConfig) GetKind() schema.GroupKind {
+	return extensionsinternal.Kind("ReplicaSet")
+}
+
 func (config *ReplicaSetConfig) create() error {
 	rs := &extensions.ReplicaSet{
-		ObjectMeta: api.ObjectMeta{
+		ObjectMeta: v1.ObjectMeta{
 			Name: config.Name,
 		},
 		Spec: extensions.ReplicaSetSpec{
-			Replicas: int32(config.Replicas),
-			Selector: &unversioned.LabelSelector{
+			Replicas: func(i int) *int32 { x := int32(i); return &x }(config.Replicas),
+			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					"name": config.Name,
 				},
 			},
-			Template: api.PodTemplateSpec{
-				ObjectMeta: api.ObjectMeta{
+			Template: v1.PodTemplateSpec{
+				ObjectMeta: v1.ObjectMeta{
 					Labels: map[string]string{"name": config.Name},
 				},
-				Spec: api.PodSpec{
-					Containers: []api.Container{
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{
 						{
 							Name:    config.Name,
 							Image:   config.Image,
 							Command: config.Command,
-							Ports:   []api.ContainerPort{{ContainerPort: 80}},
+							Ports:   []v1.ContainerPort{{ContainerPort: 80}},
 						},
 					},
 				},
 			},
 		},
+	}
+
+	if len(config.SecretNames) > 0 {
+		attachSecrets(&rs.Spec.Template, config.SecretNames)
 	}
 
 	config.applyTo(&rs.Spec.Template)
@@ -292,31 +338,67 @@ func RunRC(config RCConfig) error {
 	return config.start()
 }
 
+func (config *RCConfig) Run() error {
+	return RunRC(*config)
+}
+
+func (config *RCConfig) GetName() string {
+	return config.Name
+}
+
+func (config *RCConfig) GetNamespace() string {
+	return config.Namespace
+}
+
+func (config *RCConfig) GetKind() schema.GroupKind {
+	return api.Kind("ReplicationController")
+}
+
+func (config *RCConfig) GetClient() clientset.Interface {
+	return config.Client
+}
+
+func (config *RCConfig) GetInternalClient() internalclientset.Interface {
+	return config.InternalClient
+}
+
+func (config *RCConfig) SetClient(c clientset.Interface) {
+	config.Client = c
+}
+
+func (config *RCConfig) SetInternalClient(c internalclientset.Interface) {
+	config.InternalClient = c
+}
+
+func (config *RCConfig) GetReplicas() int {
+	return config.Replicas
+}
+
 func (config *RCConfig) create() error {
-	dnsDefault := api.DNSDefault
+	dnsDefault := v1.DNSDefault
 	if config.DNSPolicy == nil {
 		config.DNSPolicy = &dnsDefault
 	}
-	rc := &api.ReplicationController{
-		ObjectMeta: api.ObjectMeta{
+	rc := &v1.ReplicationController{
+		ObjectMeta: v1.ObjectMeta{
 			Name: config.Name,
 		},
-		Spec: api.ReplicationControllerSpec{
-			Replicas: int32(config.Replicas),
+		Spec: v1.ReplicationControllerSpec{
+			Replicas: func(i int) *int32 { x := int32(i); return &x }(config.Replicas),
 			Selector: map[string]string{
 				"name": config.Name,
 			},
-			Template: &api.PodTemplateSpec{
-				ObjectMeta: api.ObjectMeta{
+			Template: &v1.PodTemplateSpec{
+				ObjectMeta: v1.ObjectMeta{
 					Labels: map[string]string{"name": config.Name},
 				},
-				Spec: api.PodSpec{
-					Containers: []api.Container{
+				Spec: v1.PodSpec{
+					Containers: []v1.Container{
 						{
 							Name:           config.Name,
 							Image:          config.Image,
 							Command:        config.Command,
-							Ports:          []api.ContainerPort{{ContainerPort: 80}},
+							Ports:          []v1.ContainerPort{{ContainerPort: 80}},
 							ReadinessProbe: config.ReadinessProbe,
 						},
 					},
@@ -325,6 +407,10 @@ func (config *RCConfig) create() error {
 				},
 			},
 		},
+	}
+
+	if len(config.SecretNames) > 0 {
+		attachSecrets(rc.Spec.Template, config.SecretNames)
 	}
 
 	config.applyTo(rc.Spec.Template)
@@ -337,11 +423,11 @@ func (config *RCConfig) create() error {
 	return nil
 }
 
-func (config *RCConfig) applyTo(template *api.PodTemplateSpec) {
+func (config *RCConfig) applyTo(template *v1.PodTemplateSpec) {
 	if config.Env != nil {
 		for k, v := range config.Env {
 			c := &template.Spec.Containers[0]
-			c.Env = append(c.Env, api.EnvVar{Name: k, Value: v})
+			c.Env = append(c.Env, v1.EnvVar{Name: k, Value: v})
 		}
 	}
 	if config.Labels != nil {
@@ -358,32 +444,32 @@ func (config *RCConfig) applyTo(template *api.PodTemplateSpec) {
 	if config.Ports != nil {
 		for k, v := range config.Ports {
 			c := &template.Spec.Containers[0]
-			c.Ports = append(c.Ports, api.ContainerPort{Name: k, ContainerPort: int32(v)})
+			c.Ports = append(c.Ports, v1.ContainerPort{Name: k, ContainerPort: int32(v)})
 		}
 	}
 	if config.HostPorts != nil {
 		for k, v := range config.HostPorts {
 			c := &template.Spec.Containers[0]
-			c.Ports = append(c.Ports, api.ContainerPort{Name: k, ContainerPort: int32(v), HostPort: int32(v)})
+			c.Ports = append(c.Ports, v1.ContainerPort{Name: k, ContainerPort: int32(v), HostPort: int32(v)})
 		}
 	}
 	if config.CpuLimit > 0 || config.MemLimit > 0 {
-		template.Spec.Containers[0].Resources.Limits = api.ResourceList{}
+		template.Spec.Containers[0].Resources.Limits = v1.ResourceList{}
 	}
 	if config.CpuLimit > 0 {
-		template.Spec.Containers[0].Resources.Limits[api.ResourceCPU] = *resource.NewMilliQuantity(config.CpuLimit, resource.DecimalSI)
+		template.Spec.Containers[0].Resources.Limits[v1.ResourceCPU] = *resource.NewMilliQuantity(config.CpuLimit, resource.DecimalSI)
 	}
 	if config.MemLimit > 0 {
-		template.Spec.Containers[0].Resources.Limits[api.ResourceMemory] = *resource.NewQuantity(config.MemLimit, resource.DecimalSI)
+		template.Spec.Containers[0].Resources.Limits[v1.ResourceMemory] = *resource.NewQuantity(config.MemLimit, resource.DecimalSI)
 	}
 	if config.CpuRequest > 0 || config.MemRequest > 0 {
-		template.Spec.Containers[0].Resources.Requests = api.ResourceList{}
+		template.Spec.Containers[0].Resources.Requests = v1.ResourceList{}
 	}
 	if config.CpuRequest > 0 {
-		template.Spec.Containers[0].Resources.Requests[api.ResourceCPU] = *resource.NewMilliQuantity(config.CpuRequest, resource.DecimalSI)
+		template.Spec.Containers[0].Resources.Requests[v1.ResourceCPU] = *resource.NewMilliQuantity(config.CpuRequest, resource.DecimalSI)
 	}
 	if config.MemRequest > 0 {
-		template.Spec.Containers[0].Resources.Requests[api.ResourceMemory] = *resource.NewQuantity(config.MemRequest, resource.DecimalSI)
+		template.Spec.Containers[0].Resources.Requests[v1.ResourceMemory] = *resource.NewQuantity(config.MemRequest, resource.DecimalSI)
 	}
 	if len(config.Volumes) > 0 {
 		template.Spec.Volumes = config.Volumes
@@ -403,7 +489,7 @@ type RCStartupStatus struct {
 	Unknown               int
 	Inactive              int
 	FailedContainers      int
-	Created               []*api.Pod
+	Created               []*v1.Pod
 	ContainerRestartNodes sets.String
 }
 
@@ -412,10 +498,10 @@ func (s *RCStartupStatus) String(name string) string {
 		name, len(s.Created), s.Expected, s.Running, s.Pending, s.Waiting, s.Inactive, s.Terminating, s.Unknown, s.RunningButNotReady)
 }
 
-func ComputeRCStartupStatus(pods []*api.Pod, expected int) RCStartupStatus {
+func ComputeRCStartupStatus(pods []*v1.Pod, expected int) RCStartupStatus {
 	startupStatus := RCStartupStatus{
 		Expected:              expected,
-		Created:               make([]*api.Pod, 0, expected),
+		Created:               make([]*v1.Pod, 0, expected),
 		ContainerRestartNodes: sets.NewString(),
 	}
 	for _, p := range pods {
@@ -424,10 +510,10 @@ func ComputeRCStartupStatus(pods []*api.Pod, expected int) RCStartupStatus {
 			continue
 		}
 		startupStatus.Created = append(startupStatus.Created, p)
-		if p.Status.Phase == api.PodRunning {
+		if p.Status.Phase == v1.PodRunning {
 			ready := false
 			for _, c := range p.Status.Conditions {
-				if c.Type == api.PodReady && c.Status == api.ConditionTrue {
+				if c.Type == v1.PodReady && c.Status == v1.ConditionTrue {
 					ready = true
 					break
 				}
@@ -442,15 +528,15 @@ func ComputeRCStartupStatus(pods []*api.Pod, expected int) RCStartupStatus {
 				startupStatus.FailedContainers = startupStatus.FailedContainers + v.Restarts
 				startupStatus.ContainerRestartNodes.Insert(p.Spec.NodeName)
 			}
-		} else if p.Status.Phase == api.PodPending {
+		} else if p.Status.Phase == v1.PodPending {
 			if p.Spec.NodeName == "" {
 				startupStatus.Waiting++
 			} else {
 				startupStatus.Pending++
 			}
-		} else if p.Status.Phase == api.PodSucceeded || p.Status.Phase == api.PodFailed {
+		} else if p.Status.Phase == v1.PodSucceeded || p.Status.Phase == v1.PodFailed {
 			startupStatus.Inactive++
-		} else if p.Status.Phase == api.PodUnknown {
+		} else if p.Status.Phase == v1.PodUnknown {
 			startupStatus.Unknown++
 		}
 	}
@@ -479,7 +565,7 @@ func (config *RCConfig) start() error {
 	if timeout <= 0 {
 		timeout = 5 * time.Minute
 	}
-	oldPods := make([]*api.Pod, 0)
+	oldPods := make([]*v1.Pod, 0)
 	oldRunning := 0
 	lastChange := time.Now()
 	for oldRunning != config.Replicas {
@@ -535,8 +621,8 @@ func (config *RCConfig) start() error {
 
 	if oldRunning != config.Replicas {
 		// List only pods from a given replication controller.
-		options := api.ListOptions{LabelSelector: label}
-		if pods, err := config.Client.Core().Pods(api.NamespaceAll).List(options); err == nil {
+		options := v1.ListOptions{LabelSelector: label.String()}
+		if pods, err := config.Client.Core().Pods(v1.NamespaceAll).List(options); err == nil {
 
 			for _, pod := range pods.Items {
 				config.RCConfigLog("Pod %s\t%s\t%s\t%s", pod.Name, pod.Spec.NodeName, pod.Status.Phase, pod.DeletionTimestamp)
@@ -553,7 +639,7 @@ func (config *RCConfig) start() error {
 // Optionally waits for pods to start running (if waitForRunning == true).
 // The number of replicas must be non-zero.
 func StartPods(c clientset.Interface, replicas int, namespace string, podNamePrefix string,
-	pod api.Pod, waitForRunning bool, logFunc func(fmt string, args ...interface{})) error {
+	pod v1.Pod, waitForRunning bool, logFunc func(fmt string, args ...interface{})) error {
 	// no pod to start
 	if replicas < 1 {
 		panic("StartPods: number of replicas must be non-zero")
@@ -594,7 +680,7 @@ waitLoop:
 			continue waitLoop
 		}
 		for _, p := range pods {
-			if p.Status.Phase != api.PodRunning {
+			if p.Status.Phase != v1.PodRunning {
 				continue waitLoop
 			}
 		}
@@ -618,22 +704,55 @@ type TestNodePreparer interface {
 }
 
 type PrepareNodeStrategy interface {
-	PreparePatch(node *api.Node) []byte
-	CleanupNode(node *api.Node) *api.Node
+	PreparePatch(node *v1.Node) []byte
+	CleanupNode(node *v1.Node) *v1.Node
 }
 
 type TrivialNodePrepareStrategy struct{}
 
-func (*TrivialNodePrepareStrategy) PreparePatch(*api.Node) []byte {
+func (*TrivialNodePrepareStrategy) PreparePatch(*v1.Node) []byte {
 	return []byte{}
 }
 
-func (*TrivialNodePrepareStrategy) CleanupNode(node *api.Node) *api.Node {
+func (*TrivialNodePrepareStrategy) CleanupNode(node *v1.Node) *v1.Node {
 	nodeCopy := *node
 	return &nodeCopy
 }
 
-func DoPrepareNode(client clientset.Interface, node *api.Node, strategy PrepareNodeStrategy) error {
+type LabelNodePrepareStrategy struct {
+	labelKey   string
+	labelValue string
+}
+
+func NewLabelNodePrepareStrategy(labelKey string, labelValue string) *LabelNodePrepareStrategy {
+	return &LabelNodePrepareStrategy{
+		labelKey:   labelKey,
+		labelValue: labelValue,
+	}
+}
+
+func (s *LabelNodePrepareStrategy) PreparePatch(*v1.Node) []byte {
+	labelString := fmt.Sprintf("{\"%v\":\"%v\"}", s.labelKey, s.labelValue)
+	patch := fmt.Sprintf(`{"metadata":{"labels":%v}}`, labelString)
+	return []byte(patch)
+}
+
+func (s *LabelNodePrepareStrategy) CleanupNode(node *v1.Node) *v1.Node {
+	objCopy, err := api.Scheme.Copy(node)
+	if err != nil {
+		return &v1.Node{}
+	}
+	nodeCopy, ok := (objCopy).(*v1.Node)
+	if !ok {
+		return &v1.Node{}
+	}
+	if node.Labels != nil && len(node.Labels[s.labelKey]) != 0 {
+		delete(nodeCopy.Labels, s.labelKey)
+	}
+	return nodeCopy
+}
+
+func DoPrepareNode(client clientset.Interface, node *v1.Node, strategy PrepareNodeStrategy) error {
 	var err error
 	patch := strategy.PreparePatch(node)
 	if len(patch) == 0 {
@@ -653,7 +772,7 @@ func DoPrepareNode(client clientset.Interface, node *api.Node, strategy PrepareN
 
 func DoCleanupNode(client clientset.Interface, nodeName string, strategy PrepareNodeStrategy) error {
 	for attempt := 0; attempt < retries; attempt++ {
-		node, err := client.Core().Nodes().Get(nodeName)
+		node, err := client.Core().Nodes().Get(nodeName, metav1.GetOptions{})
 		if err != nil {
 			return fmt.Errorf("Skipping cleanup of Node: failed to get Node %v: %v", nodeName, err)
 		}
@@ -670,4 +789,214 @@ func DoCleanupNode(client clientset.Interface, nodeName string, strategy Prepare
 		time.Sleep(100 * time.Millisecond)
 	}
 	return fmt.Errorf("To many conflicts when trying to cleanup Node %v", nodeName)
+}
+
+type TestPodCreateStrategy func(client clientset.Interface, namespace string, podCount int) error
+
+type CountToPodStrategy struct {
+	Count    int
+	Strategy TestPodCreateStrategy
+}
+
+type TestPodCreatorConfig map[string][]CountToPodStrategy
+
+func NewTestPodCreatorConfig() *TestPodCreatorConfig {
+	config := make(TestPodCreatorConfig)
+	return &config
+}
+
+func (c *TestPodCreatorConfig) AddStrategy(
+	namespace string, podCount int, strategy TestPodCreateStrategy) {
+	(*c)[namespace] = append((*c)[namespace], CountToPodStrategy{Count: podCount, Strategy: strategy})
+}
+
+type TestPodCreator struct {
+	Client clientset.Interface
+	// namespace -> count -> strategy
+	Config *TestPodCreatorConfig
+}
+
+func NewTestPodCreator(client clientset.Interface, config *TestPodCreatorConfig) *TestPodCreator {
+	return &TestPodCreator{
+		Client: client,
+		Config: config,
+	}
+}
+
+func (c *TestPodCreator) CreatePods() error {
+	for ns, v := range *(c.Config) {
+		for _, countToStrategy := range v {
+			if err := countToStrategy.Strategy(c.Client, ns, countToStrategy.Count); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func MakePodSpec() v1.PodSpec {
+	return v1.PodSpec{
+		Containers: []v1.Container{{
+			Name:  "pause",
+			Image: "kubernetes/pause",
+			Ports: []v1.ContainerPort{{ContainerPort: 80}},
+			Resources: v1.ResourceRequirements{
+				Limits: v1.ResourceList{
+					v1.ResourceCPU:    resource.MustParse("100m"),
+					v1.ResourceMemory: resource.MustParse("500Mi"),
+				},
+				Requests: v1.ResourceList{
+					v1.ResourceCPU:    resource.MustParse("100m"),
+					v1.ResourceMemory: resource.MustParse("500Mi"),
+				},
+			},
+		}},
+	}
+}
+
+func makeCreatePod(client clientset.Interface, namespace string, podTemplate *v1.Pod) error {
+	var err error
+	for attempt := 0; attempt < retries; attempt++ {
+		if _, err := client.Core().Pods(namespace).Create(podTemplate); err == nil {
+			return nil
+		}
+		glog.Errorf("Error while creating pod, maybe retry: %v", err)
+	}
+	return fmt.Errorf("Terminal error while creating pod, won't retry: %v", err)
+}
+
+func createPod(client clientset.Interface, namespace string, podCount int, podTemplate *v1.Pod) error {
+	var createError error
+	lock := sync.Mutex{}
+	createPodFunc := func(i int) {
+		if err := makeCreatePod(client, namespace, podTemplate); err != nil {
+			lock.Lock()
+			defer lock.Unlock()
+			createError = err
+		}
+	}
+
+	if podCount < 30 {
+		workqueue.Parallelize(podCount, podCount, createPodFunc)
+	} else {
+		workqueue.Parallelize(30, podCount, createPodFunc)
+	}
+	return createError
+}
+
+func createController(client clientset.Interface, controllerName, namespace string, podCount int, podTemplate *v1.Pod) error {
+	rc := &v1.ReplicationController{
+		ObjectMeta: v1.ObjectMeta{
+			Name: controllerName,
+		},
+		Spec: v1.ReplicationControllerSpec{
+			Replicas: func(i int) *int32 { x := int32(i); return &x }(podCount),
+			Selector: map[string]string{"name": controllerName},
+			Template: &v1.PodTemplateSpec{
+				ObjectMeta: v1.ObjectMeta{
+					Labels: map[string]string{"name": controllerName},
+				},
+				Spec: podTemplate.Spec,
+			},
+		},
+	}
+	var err error
+	for attempt := 0; attempt < retries; attempt++ {
+		if _, err := client.Core().ReplicationControllers(namespace).Create(rc); err == nil {
+			return nil
+		}
+		glog.Errorf("Error while creating rc, maybe retry: %v", err)
+	}
+	return fmt.Errorf("Terminal error while creating rc, won't retry: %v", err)
+}
+
+func NewCustomCreatePodStrategy(podTemplate *v1.Pod) TestPodCreateStrategy {
+	return func(client clientset.Interface, namespace string, podCount int) error {
+		return createPod(client, namespace, podCount, podTemplate)
+	}
+}
+
+func NewSimpleCreatePodStrategy() TestPodCreateStrategy {
+	basePod := &v1.Pod{
+		ObjectMeta: v1.ObjectMeta{
+			GenerateName: "simple-pod-",
+		},
+		Spec: MakePodSpec(),
+	}
+	return NewCustomCreatePodStrategy(basePod)
+}
+
+func NewSimpleWithControllerCreatePodStrategy(controllerName string) TestPodCreateStrategy {
+	return func(client clientset.Interface, namespace string, podCount int) error {
+		basePod := &v1.Pod{
+			ObjectMeta: v1.ObjectMeta{
+				GenerateName: controllerName + "-pod-",
+				Labels:       map[string]string{"name": controllerName},
+			},
+			Spec: MakePodSpec(),
+		}
+		if err := createController(client, controllerName, namespace, podCount, basePod); err != nil {
+			return err
+		}
+		return createPod(client, namespace, podCount, basePod)
+	}
+}
+
+type SecretConfig struct {
+	Content   map[string]string
+	Client    clientset.Interface
+	Name      string
+	Namespace string
+	// If set this function will be used to print log lines instead of glog.
+	LogFunc func(fmt string, args ...interface{})
+}
+
+func (config *SecretConfig) Run() error {
+	secret := &v1.Secret{
+		ObjectMeta: v1.ObjectMeta{
+			Name: config.Name,
+		},
+		StringData: map[string]string{},
+	}
+	for k, v := range config.Content {
+		secret.StringData[k] = v
+	}
+
+	_, err := config.Client.Core().Secrets(config.Namespace).Create(secret)
+	if err != nil {
+		return fmt.Errorf("Error creating secret: %v", err)
+	}
+	config.LogFunc("Created secret %v/%v", config.Namespace, config.Name)
+	return nil
+}
+
+func (config *SecretConfig) Stop() error {
+	if err := config.Client.Core().Secrets(config.Namespace).Delete(config.Name, &v1.DeleteOptions{}); err != nil {
+		return fmt.Errorf("Error deleting secret: %v", err)
+	}
+	config.LogFunc("Deleted secret %v/%v", config.Namespace, config.Name)
+	return nil
+}
+
+// TODO: attach secrets using different possibilities: env vars, image pull secrets.
+func attachSecrets(template *v1.PodTemplateSpec, secretNames []string) {
+	volumes := make([]v1.Volume, 0, len(secretNames))
+	mounts := make([]v1.VolumeMount, 0, len(secretNames))
+	for _, name := range secretNames {
+		volumes = append(volumes, v1.Volume{
+			Name: name,
+			VolumeSource: v1.VolumeSource{
+				Secret: &v1.SecretVolumeSource{
+					SecretName: name,
+				},
+			},
+		})
+		mounts = append(mounts, v1.VolumeMount{
+			Name:      name,
+			MountPath: fmt.Sprintf("/%v", name),
+		})
+	}
+
+	template.Spec.Volumes = volumes
+	template.Spec.Containers[0].VolumeMounts = mounts
 }

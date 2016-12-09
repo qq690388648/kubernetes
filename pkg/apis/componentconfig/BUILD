@@ -22,9 +22,11 @@ go_library(
     ],
     tags = ["automanaged"],
     deps = [
-        "//pkg/api/unversioned:go_default_library",
+        "//pkg/api:go_default_library",
+        "//pkg/apis/meta/v1:go_default_library",
         "//pkg/conversion:go_default_library",
         "//pkg/runtime:go_default_library",
+        "//pkg/runtime/schema:go_default_library",
         "//pkg/util/config:go_default_library",
         "//pkg/util/net:go_default_library",
         "//vendor:github.com/ugorji/go/codec",

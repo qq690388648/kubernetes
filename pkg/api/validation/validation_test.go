@@ -26,8 +26,9 @@ import (
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/resource"
 	"k8s.io/kubernetes/pkg/api/service"
-	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/apimachinery/registered"
+	metav1 "k8s.io/kubernetes/pkg/apis/meta/v1"
+	storageutil "k8s.io/kubernetes/pkg/apis/storage/util"
 	"k8s.io/kubernetes/pkg/capabilities"
 	"k8s.io/kubernetes/pkg/security/apparmor"
 	"k8s.io/kubernetes/pkg/util/intstr"
@@ -227,21 +228,21 @@ func TestValidateObjectMetaOwnerReferences(t *testing.T) {
 func TestValidateObjectMetaUpdateIgnoresCreationTimestamp(t *testing.T) {
 	if errs := ValidateObjectMetaUpdate(
 		&api.ObjectMeta{Name: "test", ResourceVersion: "1"},
-		&api.ObjectMeta{Name: "test", ResourceVersion: "1", CreationTimestamp: unversioned.NewTime(time.Unix(10, 0))},
+		&api.ObjectMeta{Name: "test", ResourceVersion: "1", CreationTimestamp: metav1.NewTime(time.Unix(10, 0))},
 		field.NewPath("field"),
 	); len(errs) != 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 	if errs := ValidateObjectMetaUpdate(
-		&api.ObjectMeta{Name: "test", ResourceVersion: "1", CreationTimestamp: unversioned.NewTime(time.Unix(10, 0))},
+		&api.ObjectMeta{Name: "test", ResourceVersion: "1", CreationTimestamp: metav1.NewTime(time.Unix(10, 0))},
 		&api.ObjectMeta{Name: "test", ResourceVersion: "1"},
 		field.NewPath("field"),
 	); len(errs) != 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
 	if errs := ValidateObjectMetaUpdate(
-		&api.ObjectMeta{Name: "test", ResourceVersion: "1", CreationTimestamp: unversioned.NewTime(time.Unix(10, 0))},
-		&api.ObjectMeta{Name: "test", ResourceVersion: "1", CreationTimestamp: unversioned.NewTime(time.Unix(11, 0))},
+		&api.ObjectMeta{Name: "test", ResourceVersion: "1", CreationTimestamp: metav1.NewTime(time.Unix(10, 0))},
+		&api.ObjectMeta{Name: "test", ResourceVersion: "1", CreationTimestamp: metav1.NewTime(time.Unix(11, 0))},
 		field.NewPath("field"),
 	); len(errs) != 0 {
 		t.Fatalf("unexpected errors: %v", errs)
@@ -255,18 +256,18 @@ func TestValidateFinalizersUpdate(t *testing.T) {
 		ExpectedErr string
 	}{
 		"invalid adding finalizers": {
-			Old:         api.ObjectMeta{Name: "test", ResourceVersion: "1", DeletionTimestamp: &unversioned.Time{}, Finalizers: []string{"x/a"}},
-			New:         api.ObjectMeta{Name: "test", ResourceVersion: "1", DeletionTimestamp: &unversioned.Time{}, Finalizers: []string{"x/a", "y/b"}},
+			Old:         api.ObjectMeta{Name: "test", ResourceVersion: "1", DeletionTimestamp: &metav1.Time{}, Finalizers: []string{"x/a"}},
+			New:         api.ObjectMeta{Name: "test", ResourceVersion: "1", DeletionTimestamp: &metav1.Time{}, Finalizers: []string{"x/a", "y/b"}},
 			ExpectedErr: "y/b",
 		},
 		"invalid changing finalizers": {
-			Old:         api.ObjectMeta{Name: "test", ResourceVersion: "1", DeletionTimestamp: &unversioned.Time{}, Finalizers: []string{"x/a"}},
-			New:         api.ObjectMeta{Name: "test", ResourceVersion: "1", DeletionTimestamp: &unversioned.Time{}, Finalizers: []string{"x/b"}},
+			Old:         api.ObjectMeta{Name: "test", ResourceVersion: "1", DeletionTimestamp: &metav1.Time{}, Finalizers: []string{"x/a"}},
+			New:         api.ObjectMeta{Name: "test", ResourceVersion: "1", DeletionTimestamp: &metav1.Time{}, Finalizers: []string{"x/b"}},
 			ExpectedErr: "x/b",
 		},
 		"valid removing finalizers": {
-			Old:         api.ObjectMeta{Name: "test", ResourceVersion: "1", DeletionTimestamp: &unversioned.Time{}, Finalizers: []string{"x/a", "y/b"}},
-			New:         api.ObjectMeta{Name: "test", ResourceVersion: "1", DeletionTimestamp: &unversioned.Time{}, Finalizers: []string{"x/a"}},
+			Old:         api.ObjectMeta{Name: "test", ResourceVersion: "1", DeletionTimestamp: &metav1.Time{}, Finalizers: []string{"x/a", "y/b"}},
+			New:         api.ObjectMeta{Name: "test", ResourceVersion: "1", DeletionTimestamp: &metav1.Time{}, Finalizers: []string{"x/a"}},
 			ExpectedErr: "",
 		},
 		"valid adding finalizers for objects not being deleted": {
@@ -288,8 +289,8 @@ func TestValidateFinalizersUpdate(t *testing.T) {
 }
 
 func TestValidateObjectMetaUpdatePreventsDeletionFieldMutation(t *testing.T) {
-	now := unversioned.NewTime(time.Unix(1000, 0).UTC())
-	later := unversioned.NewTime(time.Unix(2000, 0).UTC())
+	now := metav1.NewTime(time.Unix(1000, 0).UTC())
+	later := metav1.NewTime(time.Unix(2000, 0).UTC())
 	gracePeriodShort := int64(30)
 	gracePeriodLong := int64(40)
 
@@ -661,6 +662,36 @@ func testVolumeClaim(name string, namespace string, spec api.PersistentVolumeCla
 	}
 }
 
+func testVolumeClaimStorageClass(name string, namespace string, annval string, spec api.PersistentVolumeClaimSpec) *api.PersistentVolumeClaim {
+	annotations := map[string]string{
+		storageutil.StorageClassAnnotation: annval,
+	}
+
+	return &api.PersistentVolumeClaim{
+		ObjectMeta: api.ObjectMeta{
+			Name:        name,
+			Namespace:   namespace,
+			Annotations: annotations,
+		},
+		Spec: spec,
+	}
+}
+
+func testVolumeClaimAnnotation(name string, namespace string, ann string, annval string, spec api.PersistentVolumeClaimSpec) *api.PersistentVolumeClaim {
+	annotations := map[string]string{
+		ann: annval,
+	}
+
+	return &api.PersistentVolumeClaim{
+		ObjectMeta: api.ObjectMeta{
+			Name:        name,
+			Namespace:   namespace,
+			Annotations: annotations,
+		},
+		Spec: spec,
+	}
+}
+
 func TestValidatePersistentVolumeClaim(t *testing.T) {
 	scenarios := map[string]struct {
 		isExpectedFailure bool
@@ -669,8 +700,8 @@ func TestValidatePersistentVolumeClaim(t *testing.T) {
 		"good-claim": {
 			isExpectedFailure: false,
 			claim: testVolumeClaim("foo", "ns", api.PersistentVolumeClaimSpec{
-				Selector: &unversioned.LabelSelector{
-					MatchExpressions: []unversioned.LabelSelectorRequirement{
+				Selector: &metav1.LabelSelector{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
 						{
 							Key:      "key2",
 							Operator: "Exists",
@@ -691,8 +722,8 @@ func TestValidatePersistentVolumeClaim(t *testing.T) {
 		"invalid-label-selector": {
 			isExpectedFailure: true,
 			claim: testVolumeClaim("foo", "ns", api.PersistentVolumeClaimSpec{
-				Selector: &unversioned.LabelSelector{
-					MatchExpressions: []unversioned.LabelSelectorRequirement{
+				Selector: &metav1.LabelSelector{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
 						{
 							Key:      "key2",
 							Operator: "InvalidOp",
@@ -770,8 +801,8 @@ func TestValidatePersistentVolumeClaim(t *testing.T) {
 		"negative-storage-request": {
 			isExpectedFailure: true,
 			claim: testVolumeClaim("foo", "ns", api.PersistentVolumeClaimSpec{
-				Selector: &unversioned.LabelSelector{
-					MatchExpressions: []unversioned.LabelSelectorRequirement{
+				Selector: &metav1.LabelSelector{
+					MatchExpressions: []metav1.LabelSelectorRequirement{
 						{
 							Key:      "key2",
 							Operator: "Exists",
@@ -806,6 +837,26 @@ func TestValidatePersistentVolumeClaimUpdate(t *testing.T) {
 	validClaim := testVolumeClaim("foo", "ns", api.PersistentVolumeClaimSpec{
 		AccessModes: []api.PersistentVolumeAccessMode{
 			api.ReadWriteOnce,
+			api.ReadOnlyMany,
+		},
+		Resources: api.ResourceRequirements{
+			Requests: api.ResourceList{
+				api.ResourceName(api.ResourceStorage): resource.MustParse("10G"),
+			},
+		},
+	})
+	validClaimStorageClass := testVolumeClaimStorageClass("foo", "ns", "fast", api.PersistentVolumeClaimSpec{
+		AccessModes: []api.PersistentVolumeAccessMode{
+			api.ReadOnlyMany,
+		},
+		Resources: api.ResourceRequirements{
+			Requests: api.ResourceList{
+				api.ResourceName(api.ResourceStorage): resource.MustParse("10G"),
+			},
+		},
+	})
+	validClaimAnnotation := testVolumeClaimAnnotation("foo", "ns", "description", "foo-description", api.PersistentVolumeClaimSpec{
+		AccessModes: []api.PersistentVolumeAccessMode{
 			api.ReadOnlyMany,
 		},
 		Resources: api.ResourceRequirements{
@@ -849,6 +900,40 @@ func TestValidatePersistentVolumeClaimUpdate(t *testing.T) {
 		},
 		VolumeName: "volume",
 	})
+	invalidUpdateClaimStorageClass := testVolumeClaimStorageClass("foo", "ns", "fast2", api.PersistentVolumeClaimSpec{
+		AccessModes: []api.PersistentVolumeAccessMode{
+			api.ReadOnlyMany,
+		},
+		Resources: api.ResourceRequirements{
+			Requests: api.ResourceList{
+				api.ResourceName(api.ResourceStorage): resource.MustParse("10G"),
+			},
+		},
+		VolumeName: "volume",
+	})
+	validUpdateClaimMutableAnnotation := testVolumeClaimAnnotation("foo", "ns", "description", "updated-or-added-foo-description", api.PersistentVolumeClaimSpec{
+		AccessModes: []api.PersistentVolumeAccessMode{
+			api.ReadOnlyMany,
+		},
+		Resources: api.ResourceRequirements{
+			Requests: api.ResourceList{
+				api.ResourceName(api.ResourceStorage): resource.MustParse("10G"),
+			},
+		},
+		VolumeName: "volume",
+	})
+	validAddClaimAnnotation := testVolumeClaimAnnotation("foo", "ns", "description", "updated-or-added-foo-description", api.PersistentVolumeClaimSpec{
+		AccessModes: []api.PersistentVolumeAccessMode{
+			api.ReadWriteOnce,
+			api.ReadOnlyMany,
+		},
+		Resources: api.ResourceRequirements{
+			Requests: api.ResourceList{
+				api.ResourceName(api.ResourceStorage): resource.MustParse("10G"),
+			},
+		},
+		VolumeName: "volume",
+	})
 	scenarios := map[string]struct {
 		isExpectedFailure bool
 		oldClaim          *api.PersistentVolumeClaim
@@ -873,6 +958,21 @@ func TestValidatePersistentVolumeClaimUpdate(t *testing.T) {
 			isExpectedFailure: true,
 			oldClaim:          validUpdateClaim,
 			newClaim:          invalidUpdateClaimAccessModes,
+		},
+		"invalid-update-change-storage-class-annotation-after-creation": {
+			isExpectedFailure: true,
+			oldClaim:          validClaimStorageClass,
+			newClaim:          invalidUpdateClaimStorageClass,
+		},
+		"valid-update-mutable-annotation": {
+			isExpectedFailure: false,
+			oldClaim:          validClaimAnnotation,
+			newClaim:          validUpdateClaimMutableAnnotation,
+		},
+		"valid-update-add-annotation": {
+			isExpectedFailure: false,
+			oldClaim:          validClaim,
+			newClaim:          validAddClaimAnnotation,
 		},
 	}
 
@@ -2447,6 +2547,14 @@ func TestValidateEnv(t *testing.T) {
 			expectedError: "[0].valueFrom: Invalid value: \"\": may not be specified when `value` is not empty",
 		},
 		{
+			name: "valueFrom without a source",
+			envs: []api.EnvVar{{
+				Name:      "abc",
+				ValueFrom: &api.EnvVarSource{},
+			}},
+			expectedError: "[0].valueFrom: Invalid value: \"\": must specify one of: `fieldRef`, `resourceFieldRef`, `configMapKeyRef` or `secretKeyRef`",
+		},
+		{
 			name: "valueFrom.fieldRef and valueFrom.secretKeyRef specified",
 			envs: []api.EnvVar{{
 				Name: "abc",
@@ -2611,6 +2719,7 @@ func TestValidateVolumeMounts(t *testing.T) {
 		{Name: "abc-123", MountPath: "/bab", SubPath: "baz"},
 		{Name: "abc-123", MountPath: "/bac", SubPath: ".baz"},
 		{Name: "abc-123", MountPath: "/bad", SubPath: "..baz"},
+		{Name: "abc", MountPath: "c:/foo/bar"},
 	}
 	if errs := validateVolumeMounts(successCase, volumes, field.NewPath("field")); len(errs) != 0 {
 		t.Errorf("expected success: %v", errs)
@@ -2620,7 +2729,6 @@ func TestValidateVolumeMounts(t *testing.T) {
 		"empty name":          {{Name: "", MountPath: "/foo"}},
 		"name not found":      {{Name: "", MountPath: "/foo"}},
 		"empty mountpath":     {{Name: "abc", MountPath: ""}},
-		"colon mountpath":     {{Name: "abc", MountPath: "foo:bar"}},
 		"mountpath collision": {{Name: "foo", MountPath: "/path/a"}, {Name: "bar", MountPath: "/path/a"}},
 		"absolute subpath":    {{Name: "abc", MountPath: "/bar", SubPath: "/baz"}},
 		"subpath in ..":       {{Name: "abc", MountPath: "/bar", SubPath: "../baz"}},
@@ -3665,6 +3773,52 @@ func TestValidatePod(t *testing.T) {
 			},
 			Spec: validPodSpec,
 		},
+		{ // valid opaque integer resources for init container
+			ObjectMeta: api.ObjectMeta{Name: "valid-opaque-int", Namespace: "ns"},
+			Spec: api.PodSpec{
+				InitContainers: []api.Container{
+					{
+						Name:            "valid-opaque-int",
+						Image:           "image",
+						ImagePullPolicy: "IfNotPresent",
+						Resources: api.ResourceRequirements{
+							Requests: api.ResourceList{
+								api.OpaqueIntResourceName("A"): resource.MustParse("10"),
+							},
+							Limits: api.ResourceList{
+								api.OpaqueIntResourceName("A"): resource.MustParse("20"),
+							},
+						},
+					},
+				},
+				Containers:    []api.Container{{Name: "ctr", Image: "image", ImagePullPolicy: "IfNotPresent"}},
+				RestartPolicy: api.RestartPolicyAlways,
+				DNSPolicy:     api.DNSClusterFirst,
+			},
+		},
+		{ // valid opaque integer resources for regular container
+			ObjectMeta: api.ObjectMeta{Name: "valid-opaque-int", Namespace: "ns"},
+			Spec: api.PodSpec{
+				InitContainers: []api.Container{{Name: "ctr", Image: "image", ImagePullPolicy: "IfNotPresent"}},
+				Containers: []api.Container{
+					{
+						Name:            "valid-opaque-int",
+						Image:           "image",
+						ImagePullPolicy: "IfNotPresent",
+						Resources: api.ResourceRequirements{
+							Requests: api.ResourceList{
+								api.OpaqueIntResourceName("A"): resource.MustParse("10"),
+							},
+							Limits: api.ResourceList{
+								api.OpaqueIntResourceName("A"): resource.MustParse("20"),
+							},
+						},
+					},
+				},
+				RestartPolicy: api.RestartPolicyAlways,
+				DNSPolicy:     api.DNSClusterFirst,
+			},
+		},
 	}
 	for _, pod := range successCases {
 		if errs := ValidatePod(&pod); len(errs) != 0 {
@@ -4155,6 +4309,112 @@ func TestValidatePod(t *testing.T) {
 			},
 			Spec: validPodSpec,
 		},
+		"invalid opaque integer resource requirement: request must be <= limit": {
+			ObjectMeta: api.ObjectMeta{Name: "123", Namespace: "ns"},
+			Spec: api.PodSpec{
+				Containers: []api.Container{
+					{
+						Name:            "invalid",
+						Image:           "image",
+						ImagePullPolicy: "IfNotPresent",
+						Resources: api.ResourceRequirements{
+							Requests: api.ResourceList{
+								api.OpaqueIntResourceName("A"): resource.MustParse("2"),
+							},
+							Limits: api.ResourceList{
+								api.OpaqueIntResourceName("A"): resource.MustParse("1"),
+							},
+						},
+					},
+				},
+				RestartPolicy: api.RestartPolicyAlways,
+				DNSPolicy:     api.DNSClusterFirst,
+			},
+		},
+		"invalid fractional opaque integer resource in container request": {
+			ObjectMeta: api.ObjectMeta{Name: "123", Namespace: "ns"},
+			Spec: api.PodSpec{
+				Containers: []api.Container{
+					{
+						Name:            "invalid",
+						Image:           "image",
+						ImagePullPolicy: "IfNotPresent",
+						Resources: api.ResourceRequirements{
+							Requests: api.ResourceList{
+								api.OpaqueIntResourceName("A"): resource.MustParse("500m"),
+							},
+						},
+					},
+				},
+				RestartPolicy: api.RestartPolicyAlways,
+				DNSPolicy:     api.DNSClusterFirst,
+			},
+		},
+		"invalid fractional opaque integer resource in init container request": {
+			ObjectMeta: api.ObjectMeta{Name: "123", Namespace: "ns"},
+			Spec: api.PodSpec{
+				InitContainers: []api.Container{
+					{
+						Name:            "invalid",
+						Image:           "image",
+						ImagePullPolicy: "IfNotPresent",
+						Resources: api.ResourceRequirements{
+							Requests: api.ResourceList{
+								api.OpaqueIntResourceName("A"): resource.MustParse("500m"),
+							},
+						},
+					},
+				},
+				Containers:    []api.Container{{Name: "ctr", Image: "image", ImagePullPolicy: "IfNotPresent"}},
+				RestartPolicy: api.RestartPolicyAlways,
+				DNSPolicy:     api.DNSClusterFirst,
+			},
+		},
+		"invalid fractional opaque integer resource in container limit": {
+			ObjectMeta: api.ObjectMeta{Name: "123", Namespace: "ns"},
+			Spec: api.PodSpec{
+				Containers: []api.Container{
+					{
+						Name:            "invalid",
+						Image:           "image",
+						ImagePullPolicy: "IfNotPresent",
+						Resources: api.ResourceRequirements{
+							Requests: api.ResourceList{
+								api.OpaqueIntResourceName("A"): resource.MustParse("5"),
+							},
+							Limits: api.ResourceList{
+								api.OpaqueIntResourceName("A"): resource.MustParse("2.5"),
+							},
+						},
+					},
+				},
+				RestartPolicy: api.RestartPolicyAlways,
+				DNSPolicy:     api.DNSClusterFirst,
+			},
+		},
+		"invalid fractional opaque integer resource in init container limit": {
+			ObjectMeta: api.ObjectMeta{Name: "123", Namespace: "ns"},
+			Spec: api.PodSpec{
+				InitContainers: []api.Container{
+					{
+						Name:            "invalid",
+						Image:           "image",
+						ImagePullPolicy: "IfNotPresent",
+						Resources: api.ResourceRequirements{
+							Requests: api.ResourceList{
+								api.OpaqueIntResourceName("A"): resource.MustParse("5"),
+							},
+							Limits: api.ResourceList{
+								api.OpaqueIntResourceName("A"): resource.MustParse("2.5"),
+							},
+						},
+					},
+				},
+				Containers:    []api.Container{{Name: "ctr", Image: "image", ImagePullPolicy: "IfNotPresent"}},
+				RestartPolicy: api.RestartPolicyAlways,
+				DNSPolicy:     api.DNSClusterFirst,
+			},
+		},
 	}
 	for k, v := range errorCases {
 		if errs := ValidatePod(&v); len(errs) == 0 {
@@ -4170,7 +4430,7 @@ func TestValidatePodUpdate(t *testing.T) {
 		activeDeadlineSecondsPositive = int64(30)
 		activeDeadlineSecondsLarger   = int64(31)
 
-		now    = unversioned.Now()
+		now    = metav1.Now()
 		grace  = int64(30)
 		grace2 = int64(31)
 	)
@@ -6347,6 +6607,60 @@ func TestValidateNodeUpdate(t *testing.T) {
 				},
 			},
 		}, false},
+		{api.Node{
+			ObjectMeta: api.ObjectMeta{
+				Name: "valid-opaque-int-resources",
+			},
+		}, api.Node{
+			ObjectMeta: api.ObjectMeta{
+				Name: "valid-opaque-int-resources",
+			},
+			Status: api.NodeStatus{
+				Capacity: api.ResourceList{
+					api.ResourceName(api.ResourceCPU):    resource.MustParse("10"),
+					api.ResourceName(api.ResourceMemory): resource.MustParse("10G"),
+					api.OpaqueIntResourceName("A"):       resource.MustParse("5"),
+					api.OpaqueIntResourceName("B"):       resource.MustParse("10"),
+				},
+			},
+		}, true},
+		{api.Node{
+			ObjectMeta: api.ObjectMeta{
+				Name: "invalid-fractional-opaque-int-capacity",
+			},
+		}, api.Node{
+			ObjectMeta: api.ObjectMeta{
+				Name: "invalid-fractional-opaque-int-capacity",
+			},
+			Status: api.NodeStatus{
+				Capacity: api.ResourceList{
+					api.ResourceName(api.ResourceCPU):    resource.MustParse("10"),
+					api.ResourceName(api.ResourceMemory): resource.MustParse("10G"),
+					api.OpaqueIntResourceName("A"):       resource.MustParse("500m"),
+				},
+			},
+		}, false},
+		{api.Node{
+			ObjectMeta: api.ObjectMeta{
+				Name: "invalid-fractional-opaque-int-allocatable",
+			},
+		}, api.Node{
+			ObjectMeta: api.ObjectMeta{
+				Name: "invalid-fractional-opaque-int-allocatable",
+			},
+			Status: api.NodeStatus{
+				Capacity: api.ResourceList{
+					api.ResourceName(api.ResourceCPU):    resource.MustParse("10"),
+					api.ResourceName(api.ResourceMemory): resource.MustParse("10G"),
+					api.OpaqueIntResourceName("A"):       resource.MustParse("5"),
+				},
+				Allocatable: api.ResourceList{
+					api.ResourceName(api.ResourceCPU):    resource.MustParse("10"),
+					api.ResourceName(api.ResourceMemory): resource.MustParse("10G"),
+					api.OpaqueIntResourceName("A"):       resource.MustParse("4.5"),
+				},
+			},
+		}, false},
 	}
 	for i, test := range tests {
 		test.oldNode.ObjectMeta.ResourceVersion = "1"
@@ -6461,7 +6775,7 @@ func TestValidateServiceUpdate(t *testing.T) {
 				newSvc.Spec.Type = api.ServiceTypeLoadBalancer
 				newSvc.Spec.LoadBalancerSourceRanges = []string{"10.0.0.0/8"}
 			},
-			numErrs: 1,
+			numErrs: 0,
 		},
 		{
 			name: "update loadBalancerSourceRanges",
@@ -6471,7 +6785,7 @@ func TestValidateServiceUpdate(t *testing.T) {
 				newSvc.Spec.Type = api.ServiceTypeLoadBalancer
 				newSvc.Spec.LoadBalancerSourceRanges = []string{"10.180.0.0/16"}
 			},
-			numErrs: 1,
+			numErrs: 0,
 		},
 		{
 			name: "LoadBalancer type cannot have None ClusterIP",
@@ -6864,6 +7178,28 @@ func TestValidateLimitRange(t *testing.T) {
 			},
 		},
 		{
+			name: "pvc-min-only",
+			spec: api.LimitRangeSpec{
+				Limits: []api.LimitRangeItem{
+					{
+						Type: api.LimitTypePersistentVolumeClaim,
+						Min:  getStorageResourceList("5Gi"),
+					},
+				},
+			},
+		},
+		{
+			name: "pvc-max-only",
+			spec: api.LimitRangeSpec{
+				Limits: []api.LimitRangeItem{
+					{
+						Type: api.LimitTypePersistentVolumeClaim,
+						Max:  getStorageResourceList("10Gi"),
+					},
+				},
+			},
+		},
+		{
 			name: "all-fields-valid-big-numbers",
 			spec: api.LimitRangeSpec{
 				Limits: []api.LimitRangeItem{
@@ -7070,27 +7406,15 @@ func TestValidateLimitRange(t *testing.T) {
 			}},
 			"must be a standard limit type or fully qualified",
 		},
-		"invalid missing required min field": {
+		"min and max values missing, one required": {
 			api.LimitRange{ObjectMeta: api.ObjectMeta{Name: "abc", Namespace: "foo"}, Spec: api.LimitRangeSpec{
 				Limits: []api.LimitRangeItem{
 					{
 						Type: api.LimitTypePersistentVolumeClaim,
-						Max:  getStorageResourceList("10000T"),
 					},
 				},
 			}},
-			"minimum storage value is required",
-		},
-		"invalid missing required max field": {
-			api.LimitRange{ObjectMeta: api.ObjectMeta{Name: "abc", Namespace: "foo"}, Spec: api.LimitRangeSpec{
-				Limits: []api.LimitRangeItem{
-					{
-						Type: api.LimitTypePersistentVolumeClaim,
-						Min:  getStorageResourceList("10000T"),
-					},
-				},
-			}},
-			"maximum storage value is required",
+			"either minimum or maximum storage value is required, but neither was provided",
 		},
 		"invalid min greater than max": {
 			api.LimitRange{ObjectMeta: api.ObjectMeta{Name: "abc", Namespace: "foo"}, Spec: api.LimitRangeSpec{
@@ -7438,7 +7762,7 @@ func TestValidateNamespaceFinalizeUpdate(t *testing.T) {
 }
 
 func TestValidateNamespaceStatusUpdate(t *testing.T) {
-	now := unversioned.Now()
+	now := metav1.Now()
 
 	tests := []struct {
 		oldNamespace api.Namespace
@@ -8185,7 +8509,7 @@ func fakeValidSecurityContext(priv bool) *api.SecurityContext {
 }
 
 func TestValidPodLogOptions(t *testing.T) {
-	now := unversioned.Now()
+	now := metav1.Now()
 	negative := int64(-1)
 	zero := int64(0)
 	positive := int64(1)

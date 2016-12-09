@@ -12,6 +12,33 @@ load(
 
 go_library(
     name = "go_default_library",
-    srcs = ["main.go"],
-    tags = ["automanaged"],
+    srcs = [
+        "gobindata_util.go",
+        "main.go",
+        ":bindata",
+    ],
+    deps = [
+        "//vendor:github.com/golang/glog",
+    ],
+)
+
+genrule(
+    name = "bindata",
+    srcs = [
+        "//examples:sources",
+        "//test/images:sources",
+        "//test/fixtures:sources",
+        "//test/e2e/testing-manifests:sources",
+    ],
+    outs = ["bindata.go"],
+    cmd = """
+$(location //vendor:github.com/jteeuwen/go-bindata/go-bindata) \
+  -nometadata -o "$(OUTS)" -pkg generated \
+  -prefix $$(pwd) \
+  -ignore .jpg -ignore .png -ignore .md \
+  $(SRCS)
+""",
+    tools = [
+        "//vendor:github.com/jteeuwen/go-bindata/go-bindata",
+    ],
 )

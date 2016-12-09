@@ -25,6 +25,7 @@ go_library(
         "//pkg/apimachinery/registered:go_default_library",
         "//pkg/apis/policy/v1alpha1:go_default_library",
         "//pkg/client/restclient:go_default_library",
+        "//pkg/runtime/schema:go_default_library",
         "//pkg/runtime/serializer:go_default_library",
         "//pkg/watch:go_default_library",
     ],

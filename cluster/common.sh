@@ -147,15 +147,15 @@ function clear-kubeconfig() {
   fi
 
   local kubectl="${KUBE_ROOT}/cluster/kubectl.sh"
-  "${kubectl}" config unset "clusters.${CONTEXT}"
-  "${kubectl}" config unset "users.${CONTEXT}"
-  "${kubectl}" config unset "users.${CONTEXT}-basic-auth"
-  "${kubectl}" config unset "contexts.${CONTEXT}"
-
+  # Unset the current-context before we delete it, as otherwise kubectl errors.
   local cc=$("${kubectl}" config view -o jsonpath='{.current-context}')
   if [[ "${cc}" == "${CONTEXT}" ]]; then
     "${kubectl}" config unset current-context
   fi
+  "${kubectl}" config unset "clusters.${CONTEXT}"
+  "${kubectl}" config unset "users.${CONTEXT}"
+  "${kubectl}" config unset "users.${CONTEXT}-basic-auth"
+  "${kubectl}" config unset "contexts.${CONTEXT}"
 
   echo "Cleared config for ${CONTEXT} from ${KUBECONFIG}"
 }
@@ -369,6 +369,13 @@ function set_binary_version() {
 #   SALT_TAR_URL
 #   SALT_TAR_HASH
 function tars_from_version() {
+  local sha1sum=""
+  if which sha1sum >/dev/null 2>&1; then
+    sha1sum="sha1sum"
+  else
+    sha1sum="shasum -a1"
+  fi
+
   if [[ -z "${KUBE_VERSION-}" ]]; then
     find-release-tars
     upload-server-tars
@@ -377,13 +384,13 @@ function tars_from_version() {
     SALT_TAR_URL="https://storage.googleapis.com/kubernetes-release/release/${KUBE_VERSION}/kubernetes-salt.tar.gz"
     # TODO: Clean this up.
     KUBE_MANIFESTS_TAR_URL="${SERVER_BINARY_TAR_URL/server-linux-amd64/manifests}"
-    KUBE_MANIFESTS_TAR_HASH=$(curl ${KUBE_MANIFESTS_TAR_URL} --silent --show-error | sha1sum | awk '{print $1}')
+    KUBE_MANIFESTS_TAR_HASH=$(curl ${KUBE_MANIFESTS_TAR_URL} --silent --show-error | ${sha1sum} | awk '{print $1}')
   elif [[ ${KUBE_VERSION} =~ ${KUBE_CI_VERSION_REGEX} ]]; then
     SERVER_BINARY_TAR_URL="https://storage.googleapis.com/kubernetes-release-dev/ci/${KUBE_VERSION}/kubernetes-server-linux-amd64.tar.gz"
     SALT_TAR_URL="https://storage.googleapis.com/kubernetes-release-dev/ci/${KUBE_VERSION}/kubernetes-salt.tar.gz"
     # TODO: Clean this up.
     KUBE_MANIFESTS_TAR_URL="${SERVER_BINARY_TAR_URL/server-linux-amd64/manifests}"
-    KUBE_MANIFESTS_TAR_HASH=$(curl ${KUBE_MANIFESTS_TAR_URL} --silent --show-error | sha1sum | awk '{print $1}')
+    KUBE_MANIFESTS_TAR_HASH=$(curl ${KUBE_MANIFESTS_TAR_URL} --silent --show-error | ${sha1sum} | awk '{print $1}')
   else
     echo "Version doesn't match regexp" >&2
     exit 1
@@ -605,9 +612,9 @@ ENABLE_CLUSTER_DNS: $(yaml-quote ${ENABLE_CLUSTER_DNS:-false})
 ENABLE_CLUSTER_REGISTRY: $(yaml-quote ${ENABLE_CLUSTER_REGISTRY:-false})
 CLUSTER_REGISTRY_DISK: $(yaml-quote ${CLUSTER_REGISTRY_DISK:-})
 CLUSTER_REGISTRY_DISK_SIZE: $(yaml-quote ${CLUSTER_REGISTRY_DISK_SIZE:-})
-DNS_REPLICAS: $(yaml-quote ${DNS_REPLICAS:-})
 DNS_SERVER_IP: $(yaml-quote ${DNS_SERVER_IP:-})
 DNS_DOMAIN: $(yaml-quote ${DNS_DOMAIN:-})
+ENABLE_DNS_HORIZONTAL_AUTOSCALER: $(yaml-quote ${ENABLE_DNS_HORIZONTAL_AUTOSCALER:-false})
 KUBELET_TOKEN: $(yaml-quote ${KUBELET_TOKEN:-})
 KUBE_PROXY_TOKEN: $(yaml-quote ${KUBE_PROXY_TOKEN:-})
 ADMISSION_CONTROL: $(yaml-quote ${ADMISSION_CONTROL:-})
@@ -620,6 +627,7 @@ NETWORK_PROVIDER: $(yaml-quote ${NETWORK_PROVIDER:-})
 NETWORK_POLICY_PROVIDER: $(yaml-quote ${NETWORK_POLICY_PROVIDER:-})
 PREPULL_E2E_IMAGES: $(yaml-quote ${PREPULL_E2E_IMAGES:-})
 HAIRPIN_MODE: $(yaml-quote ${HAIRPIN_MODE:-})
+SOFTLOCKUP_PANIC: $(yaml-quote ${SOFTLOCKUP_PANIC:-})
 OPENCONTRAIL_TAG: $(yaml-quote ${OPENCONTRAIL_TAG:-})
 OPENCONTRAIL_KUBERNETES_TAG: $(yaml-quote ${OPENCONTRAIL_KUBERNETES_TAG:-})
 OPENCONTRAIL_PUBLIC_SUBNET: $(yaml-quote ${OPENCONTRAIL_PUBLIC_SUBNET:-})
@@ -630,6 +638,7 @@ KUBE_ADDON_REGISTRY: $(yaml-quote ${KUBE_ADDON_REGISTRY:-})
 MULTIZONE: $(yaml-quote ${MULTIZONE:-})
 NON_MASQUERADE_CIDR: $(yaml-quote ${NON_MASQUERADE_CIDR:-})
 KUBE_UID: $(yaml-quote ${KUBE_UID:-})
+ENABLE_DEFAULT_STORAGE_CLASS: $(yaml-quote ${ENABLE_DEFAULT_STORAGE_CLASS:-})
 EOF
   if [ -n "${KUBELET_PORT:-}" ]; then
     cat >>$file <<EOF
@@ -699,12 +708,26 @@ ENABLE_MANIFEST_URL: $(yaml-quote ${ENABLE_MANIFEST_URL:-false})
 MANIFEST_URL: $(yaml-quote ${MANIFEST_URL:-})
 MANIFEST_URL_HEADER: $(yaml-quote ${MANIFEST_URL_HEADER:-})
 NUM_NODES: $(yaml-quote ${NUM_NODES})
-STORAGE_BACKEND: $(yaml-quote ${STORAGE_BACKEND:-})
+STORAGE_BACKEND: $(yaml-quote ${STORAGE_BACKEND:-etcd2})
 ENABLE_GARBAGE_COLLECTOR: $(yaml-quote ${ENABLE_GARBAGE_COLLECTOR:-})
+MASTER_ADVERTISE_ADDRESS: $(yaml-quote ${MASTER_ADVERTISE_ADDRESS:-})
+ETCD_CA_KEY: $(yaml-quote ${ETCD_CA_KEY_BASE64:-})
+ETCD_CA_CERT: $(yaml-quote ${ETCD_CA_CERT_BASE64:-})
+ETCD_PEER_KEY: $(yaml-quote ${ETCD_PEER_KEY_BASE64:-})
+ETCD_PEER_CERT: $(yaml-quote ${ETCD_PEER_CERT_BASE64:-})
 EOF
-    if [ -n "${TEST_ETCD_VERSION:-}" ]; then
+    # ETCD_IMAGE (if set) allows to use a custom etcd image.
+    if [ -n "${ETCD_IMAGE:-}" ]; then
       cat >>$file <<EOF
-TEST_ETCD_VERSION: $(yaml-quote ${TEST_ETCD_VERSION})
+ETCD_IMAGE: $(yaml-quote ${ETCD_IMAGE})
+EOF
+    fi
+    # ETCD_VERSION (if set) allows you to use custom version of etcd.
+    # The main purpose of using it may be rollback of etcd v3 API,
+    # where we need 3.0.* image, but are rolling back to 2.3.7.
+    if [ -n "${ETCD_VERSION:-}" ]; then
+      cat >>$file <<EOF
+ETCD_VERSION: $(yaml-quote ${ETCD_VERSION})
 EOF
     fi
     if [ -n "${APISERVER_TEST_ARGS:-}" ]; then
@@ -740,6 +763,11 @@ EOF
     if [ -n "${INITIAL_ETCD_CLUSTER:-}" ]; then
       cat >>$file <<EOF
 INITIAL_ETCD_CLUSTER: $(yaml-quote ${INITIAL_ETCD_CLUSTER})
+EOF
+    fi
+    if [ -n "${ETCD_QUORUM_READ:-}" ]; then
+      cat >>$file <<EOF
+ETCD_QUORUM_READ: $(yaml-quote ${ETCD_QUORUM_READ})
 EOF
     fi
 
@@ -817,10 +845,10 @@ EOF
 }
 
 function sha1sum-file() {
-  if which shasum >/dev/null 2>&1; then
-    shasum -a1 "$1" | awk '{ print $1 }'
-  else
+  if which sha1sum >/dev/null 2>&1; then
     sha1sum "$1" | awk '{ print $1 }'
+  else
+    shasum -a1 "$1" | awk '{ print $1 }'
   fi
 }
 
@@ -940,4 +968,43 @@ function parse-master-env() {
   EXTRA_DOCKER_OPTS=$(get-env-val "${master_env}" "EXTRA_DOCKER_OPTS")
   KUBELET_CERT_BASE64=$(get-env-val "${master_env}" "KUBELET_CERT")
   KUBELET_KEY_BASE64=$(get-env-val "${master_env}" "KUBELET_KEY")
+}
+
+# Update or verify required gcloud components are installed
+# at minimum required version.
+# Assumed vars
+#   KUBE_PROMPT_FOR_UPDATE
+function update-or-verify-gcloud() {
+  local sudo_prefix=""
+  if [ ! -w $(dirname `which gcloud`) ]; then
+    sudo_prefix="sudo"
+  fi
+  # update and install components as needed
+  if [[ "${KUBE_PROMPT_FOR_UPDATE}" == "y" ]]; then
+    ${sudo_prefix} gcloud ${gcloud_prompt:-} components install alpha
+    ${sudo_prefix} gcloud ${gcloud_prompt:-} components install beta
+    ${sudo_prefix} gcloud ${gcloud_prompt:-} components update
+  else
+    local version=$(${sudo_prefix} gcloud version --format=json)
+    python -c'
+import json,sys
+from distutils import version
+
+minVersion = version.LooseVersion("1.3.0")
+required = [ "alpha", "beta", "core" ]
+data = json.loads(sys.argv[1])
+rel = data.get("Google Cloud SDK")
+if rel != "HEAD" and version.LooseVersion(rel) < minVersion:
+  print("gcloud version out of date ( < %s )" % minVersion)
+  exit(1)
+missing = []
+for c in required:
+  if not data.get(c):
+    missing += [c]
+if missing:
+  for c in missing:
+    print ("missing required gcloud component \"{0}\"".format(c))
+  exit(1)
+    ' """${version}"""
+  fi
 }

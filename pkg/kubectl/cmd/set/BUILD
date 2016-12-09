@@ -36,7 +36,10 @@ go_library(
 
 go_test(
     name = "go_default_test",
-    srcs = ["set_image_test.go"],
+    srcs = [
+        "set_image_test.go",
+        "set_test.go",
+    ],
     data = [
         "//examples:config",
     ],
@@ -46,9 +49,10 @@ go_test(
         "//pkg/api:go_default_library",
         "//pkg/apimachinery/registered:go_default_library",
         "//pkg/client/restclient:go_default_library",
-        "//pkg/client/unversioned/fake:go_default_library",
+        "//pkg/client/restclient/fake:go_default_library",
         "//pkg/kubectl/cmd/testing:go_default_library",
         "//pkg/kubectl/cmd/util:go_default_library",
         "//pkg/kubectl/resource:go_default_library",
+        "//vendor:github.com/spf13/cobra",
     ],
 )

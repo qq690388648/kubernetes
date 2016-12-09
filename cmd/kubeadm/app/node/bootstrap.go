@@ -24,9 +24,10 @@ import (
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
 	kubeadmutil "k8s.io/kubernetes/cmd/kubeadm/app/util"
+	"k8s.io/kubernetes/pkg/api/v1"
 	"k8s.io/kubernetes/pkg/apis/certificates"
-	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset"
-	certclient "k8s.io/kubernetes/pkg/client/clientset_generated/internalclientset/typed/certificates/unversioned"
+	clientset "k8s.io/kubernetes/pkg/client/clientset_generated/release_1_5"
+	certclient "k8s.io/kubernetes/pkg/client/clientset_generated/release_1_5/typed/certificates/v1alpha1"
 	"k8s.io/kubernetes/pkg/client/unversioned/clientcmd"
 	"k8s.io/kubernetes/pkg/types"
 	"k8s.io/kubernetes/pkg/util/wait"
@@ -34,7 +35,8 @@ import (
 
 // ConnectionDetails represents a master API endpoint connection
 type ConnectionDetails struct {
-	CertClient *certclient.CertificatesClient
+	ClientSet  *clientset.Clientset
+	CertClient *certclient.CertificatesV1alpha1Client
 	Endpoint   string
 	CACert     []byte
 	NodeName   types.NodeName
@@ -82,7 +84,8 @@ func EstablishMasterConnection(s *kubeadmapi.NodeConfiguration, clusterInfo *kub
 				// connection established, stop all wait threads
 				close(stopChan)
 				result <- &ConnectionDetails{
-					CertClient: clientSet.CertificatesClient,
+					ClientSet:  clientSet,
+					CertClient: clientSet.CertificatesV1alpha1Client,
 					Endpoint:   apiEndpoint,
 					CACert:     caCert,
 					NodeName:   nodeName,
@@ -122,6 +125,24 @@ func createClients(caCert []byte, endpoint, token string, nodeName types.NodeNam
 		return nil, fmt.Errorf("failed to create clients for the API endpoint %s [%v]", endpoint, err)
 	}
 	return clientSet, nil
+}
+
+// check to see if there are other nodes in the cluster with identical node names.
+func CheckForNodeNameDuplicates(connection *ConnectionDetails) error {
+	hostName, err := os.Hostname()
+	if err != nil {
+		return fmt.Errorf("Failed to get node hostname [%v]", err)
+	}
+	nodeList, err := connection.ClientSet.Nodes().List(v1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("Failed to list the nodes in the cluster: [%v]\n", err)
+	}
+	for _, node := range nodeList.Items {
+		if hostName == node.Name {
+			return fmt.Errorf("Node with name [%q] already exists.", node.Name)
+		}
+	}
+	return nil
 }
 
 // checks the connection requirements for a specific API endpoint

@@ -1,32 +1,3 @@
-<!-- BEGIN MUNGE: UNVERSIONED_WARNING -->
-
-<!-- BEGIN STRIP_FOR_RELEASE -->
-
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-<img src="http://kubernetes.io/kubernetes/img/warning.png" alt="WARNING"
-     width="25" height="25">
-
-<h2>PLEASE NOTE: This document applies to the HEAD of the source tree</h2>
-
-If you are using a released version of Kubernetes, you should
-refer to the docs that go with that version.
-
-Documentation for other releases can be found at
-[releases.k8s.io](http://releases.k8s.io).
-</strong>
---
-
-<!-- END STRIP_FOR_RELEASE -->
-
-<!-- END MUNGE: UNVERSIONED_WARNING -->
-
 # Build with Bazel
 
 Building with bazel is currently experimental. Automanaged BUILD rules have the
@@ -52,6 +23,7 @@ To update automanaged build files, run:
 $ ./hack/update-bazel.sh
 ```
 
+**NOTES**: `update-bazel.sh` only works if check out directory of Kubernetes is "$GOPATH/src/k8s.io/kubernetes".
 
 To update a single build file, run:
 
@@ -59,7 +31,7 @@ To update a single build file, run:
 $ # get gazel
 $ go get -u github.com/mikedanese/gazel
 $ # .e.g. ./pkg/kubectl/BUILD
-$ gazel ./pkg/kubectl
+$ gazel -root="${YOUR_KUBE_ROOT_PATH}" ./pkg/kubectl
 ```
 
 Updating BUILD file for a package will be required when:

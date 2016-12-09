@@ -27,12 +27,12 @@ import (
 	"github.com/spf13/cobra"
 
 	kubeadmapi "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm"
+	kubeadmapiext "k8s.io/kubernetes/cmd/kubeadm/app/apis/kubeadm/v1alpha1"
+	"k8s.io/kubernetes/cmd/kubeadm/app/cmd/flags"
 	kubemaster "k8s.io/kubernetes/cmd/kubeadm/app/master"
 	"k8s.io/kubernetes/cmd/kubeadm/app/preflight"
 	kubeadmutil "k8s.io/kubernetes/cmd/kubeadm/app/util"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/cloudprovider"
-	_ "k8s.io/kubernetes/pkg/cloudprovider/providers"
 	"k8s.io/kubernetes/pkg/runtime"
 	netutil "k8s.io/kubernetes/pkg/util/net"
 )
@@ -61,92 +61,96 @@ var (
 
 // NewCmdInit returns "kubeadm init" command.
 func NewCmdInit(out io.Writer) *cobra.Command {
-	cfg := &kubeadmapi.MasterConfiguration{}
+	versioned := &kubeadmapiext.MasterConfiguration{}
+	api.Scheme.Default(versioned)
+	cfg := kubeadmapi.MasterConfiguration{}
+	api.Scheme.Convert(versioned, &cfg, nil)
+
 	var cfgPath string
 	var skipPreFlight bool
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Run this in order to set up the Kubernetes master.",
+		Short: "Run this in order to set up the Kubernetes master",
 		Run: func(cmd *cobra.Command, args []string) {
-			i, err := NewInit(cfgPath, cfg, skipPreFlight)
+			i, err := NewInit(cfgPath, &cfg, skipPreFlight)
 			kubeadmutil.CheckErr(err)
 			kubeadmutil.CheckErr(i.Run(out))
 		},
 	}
 
 	cmd.PersistentFlags().StringVar(
-		&cfg.Secrets.GivenToken, "token", "",
+		&cfg.Secrets.GivenToken, "token", cfg.Secrets.GivenToken,
 		"Shared secret used to secure cluster bootstrap; if none is provided, one will be generated for you",
 	)
 	cmd.PersistentFlags().StringSliceVar(
-		&cfg.API.AdvertiseAddresses, "api-advertise-addresses", []string{},
+		&cfg.API.AdvertiseAddresses, "api-advertise-addresses", cfg.API.AdvertiseAddresses,
 		"The IP addresses to advertise, in case autodetection fails",
 	)
 	cmd.PersistentFlags().StringSliceVar(
-		&cfg.API.ExternalDNSNames, "api-external-dns-names", []string{},
+		&cfg.API.ExternalDNSNames, "api-external-dns-names", cfg.API.ExternalDNSNames,
 		"The DNS names to advertise, in case you have configured them yourself",
 	)
 	cmd.PersistentFlags().StringVar(
-		&cfg.Networking.ServiceSubnet, "service-cidr", kubeadmapi.DefaultServicesSubnet,
+		&cfg.Networking.ServiceSubnet, "service-cidr", cfg.Networking.ServiceSubnet,
 		"Use alternative range of IP address for service VIPs",
 	)
 	cmd.PersistentFlags().StringVar(
-		&cfg.Networking.PodSubnet, "pod-network-cidr", "",
+		&cfg.Networking.PodSubnet, "pod-network-cidr", cfg.Networking.PodSubnet,
 		"Specify range of IP addresses for the pod network; if set, the control plane will automatically allocate CIDRs for every node",
 	)
 	cmd.PersistentFlags().StringVar(
-		&cfg.Networking.DNSDomain, "service-dns-domain", kubeadmapi.DefaultServiceDNSDomain,
+		&cfg.Networking.DNSDomain, "service-dns-domain", cfg.Networking.DNSDomain,
 		`Use alternative domain for services, e.g. "myorg.internal"`,
 	)
-	cmd.PersistentFlags().StringVar(
-		&cfg.CloudProvider, "cloud-provider", "",
-		`Enable cloud provider features (external load-balancers, storage, etc), e.g. "gce"`,
+	cmd.PersistentFlags().Var(
+		flags.NewCloudProviderFlag(&cfg.CloudProvider), "cloud-provider",
+		`Enable cloud provider features (external load-balancers, storage, etc). Note that you have to configure all kubelets manually`,
 	)
 
 	cmd.PersistentFlags().StringVar(
-		&cfg.KubernetesVersion, "use-kubernetes-version", kubeadmapi.DefaultKubernetesVersion,
+		&cfg.KubernetesVersion, "use-kubernetes-version", cfg.KubernetesVersion,
 		`Choose a specific Kubernetes version for the control plane`,
 	)
 
-	cmd.PersistentFlags().StringVar(&cfgPath, "config", "", "Path to kubeadm config file")
+	cmd.PersistentFlags().StringVar(&cfgPath, "config", cfgPath, "Path to kubeadm config file")
 
 	// TODO (phase1+) @errordeveloper make the flags below not show up in --help but rather on --advanced-help
 	cmd.PersistentFlags().StringSliceVar(
-		&cfg.Etcd.Endpoints, "external-etcd-endpoints", []string{},
+		&cfg.Etcd.Endpoints, "external-etcd-endpoints", cfg.Etcd.Endpoints,
 		"etcd endpoints to use, in case you have an external cluster",
 	)
 	cmd.PersistentFlags().MarkDeprecated("external-etcd-endpoints", "this flag will be removed when componentconfig exists")
 
 	cmd.PersistentFlags().StringVar(
-		&cfg.Etcd.CAFile, "external-etcd-cafile", "",
+		&cfg.Etcd.CAFile, "external-etcd-cafile", cfg.Etcd.CAFile,
 		"etcd certificate authority certificate file. Note: The path must be in /etc/ssl/certs",
 	)
 	cmd.PersistentFlags().MarkDeprecated("external-etcd-cafile", "this flag will be removed when componentconfig exists")
 
 	cmd.PersistentFlags().StringVar(
-		&cfg.Etcd.CertFile, "external-etcd-certfile", "",
+		&cfg.Etcd.CertFile, "external-etcd-certfile", cfg.Etcd.CertFile,
 		"etcd client certificate file. Note: The path must be in /etc/ssl/certs",
 	)
 	cmd.PersistentFlags().MarkDeprecated("external-etcd-certfile", "this flag will be removed when componentconfig exists")
 
 	cmd.PersistentFlags().StringVar(
-		&cfg.Etcd.KeyFile, "external-etcd-keyfile", "",
+		&cfg.Etcd.KeyFile, "external-etcd-keyfile", cfg.Etcd.KeyFile,
 		"etcd client key file. Note: The path must be in /etc/ssl/certs",
 	)
 	cmd.PersistentFlags().MarkDeprecated("external-etcd-keyfile", "this flag will be removed when componentconfig exists")
 
 	cmd.PersistentFlags().BoolVar(
-		&skipPreFlight, "skip-preflight-checks", false,
+		&skipPreFlight, "skip-preflight-checks", skipPreFlight,
 		"skip preflight checks normally run before modifying the system",
 	)
 
 	cmd.PersistentFlags().Int32Var(
-		&cfg.API.BindPort, "api-port", kubeadmapi.DefaultAPIBindPort,
+		&cfg.API.BindPort, "api-port", cfg.API.BindPort,
 		"Port for API to bind to",
 	)
 
 	cmd.PersistentFlags().Int32Var(
-		&cfg.Discovery.BindPort, "discovery-port", kubeadmapi.DefaultDiscoveryBindPort,
+		&cfg.Discovery.BindPort, "discovery-port", cfg.Discovery.BindPort,
 		"Port for JWS discovery service to bind to",
 	)
 
@@ -168,16 +172,6 @@ func NewInit(cfgPath string, cfg *kubeadmapi.MasterConfiguration, skipPreFlight 
 		}
 	}
 
-	if !skipPreFlight {
-		fmt.Println("Running pre-flight checks")
-		err := preflight.RunInitMasterChecks(cfg)
-		if err != nil {
-			return nil, &preflight.PreFlightError{Msg: err.Error()}
-		}
-	} else {
-		fmt.Println("Skipping pre-flight checks")
-	}
-
 	// Auto-detect the IP
 	if len(cfg.API.AdvertiseAddresses) == 0 {
 		// TODO(phase1+) perhaps we could actually grab eth0 and eth1
@@ -188,22 +182,42 @@ func NewInit(cfgPath string, cfg *kubeadmapi.MasterConfiguration, skipPreFlight 
 		cfg.API.AdvertiseAddresses = []string{ip.String()}
 	}
 
-	// TODO(phase1+) create a custom flag
-	if cfg.CloudProvider != "" {
-		if cloudprovider.IsCloudProvider(cfg.CloudProvider) {
-			fmt.Printf("cloud provider %q initialized for the control plane. Remember to set the same cloud provider flag on the kubelet.\n", cfg.CloudProvider)
+	if !skipPreFlight {
+		fmt.Println("Running pre-flight checks")
+		err := preflight.RunInitMasterChecks(cfg)
+		if err != nil {
+			return nil, &preflight.PreFlightError{Msg: err.Error()}
+		}
+	} else {
+		fmt.Println("Skipping pre-flight checks")
+	}
+
+	// validate version argument
+	ver, err := kubeadmutil.KubernetesReleaseVersion(cfg.KubernetesVersion)
+	if err != nil {
+		if cfg.KubernetesVersion != kubeadmapiext.DefaultKubernetesVersion {
+			return nil, err
 		} else {
-			return nil, fmt.Errorf("cloud provider %q is not supported, you can use any of %v, or leave it unset.\n", cfg.CloudProvider, cloudprovider.CloudProviders())
+			ver = kubeadmapiext.DefaultKubernetesFallbackVersion
 		}
 	}
+	cfg.KubernetesVersion = ver
+	fmt.Println("Using Kubernetes version:", ver)
+
+	// Warn about the limitations with the current cloudprovider solution.
+	if cfg.CloudProvider != "" {
+		fmt.Println("WARNING: For cloudprovider integrations to work --cloud-provider must be set for all kubelets in the cluster.")
+		fmt.Println("\t(/etc/systemd/system/kubelet.service.d/10-kubeadm.conf should be edited for this purpose)")
+	}
+
 	return &Init{cfg: cfg}, nil
 }
 
 // joinArgsData denotes a data object which is needed by function generateJoinArgs to generate kubeadm join arguments.
 type joinArgsData struct {
 	Cfg                      *kubeadmapi.MasterConfiguration
-	DefaultAPIBindPort       uint
-	DefaultDiscoveryBindPort uint
+	DefaultAPIBindPort       int32
+	DefaultDiscoveryBindPort int32
 }
 
 // Run executes master node provisioning, including certificates, needed static pod manifests, etc.
@@ -259,7 +273,7 @@ func (i *Init) Run(out io.Writer) error {
 		return err
 	}
 
-	data := joinArgsData{i.cfg, kubeadmapi.DefaultAPIBindPort, kubeadmapi.DefaultDiscoveryBindPort}
+	data := joinArgsData{i.cfg, kubeadmapiext.DefaultAPIBindPort, kubeadmapiext.DefaultDiscoveryBindPort}
 	if joinArgs, err := generateJoinArgs(data); err != nil {
 		return err
 	} else {

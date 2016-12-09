@@ -21,11 +21,10 @@ go_library(
     ],
     tags = ["automanaged"],
     deps = [
-        "//pkg/api:go_default_library",
+        "//pkg/api/v1:go_default_library",
         "//pkg/kubelet/container:go_default_library",
         "//pkg/kubelet/types:go_default_library",
         "//pkg/kubelet/util/format:go_default_library",
-        "//pkg/kubelet/util/ioutils:go_default_library",
         "//pkg/security/apparmor:go_default_library",
         "//pkg/types:go_default_library",
         "//pkg/util/intstr:go_default_library",
@@ -41,9 +40,8 @@ go_test(
     library = "go_default_library",
     tags = ["automanaged"],
     deps = [
-        "//pkg/api:go_default_library",
+        "//pkg/api/v1:go_default_library",
         "//pkg/kubelet/container:go_default_library",
         "//pkg/util/intstr:go_default_library",
-        "//pkg/util/term:go_default_library",
     ],
 )

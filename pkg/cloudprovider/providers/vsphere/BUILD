@@ -15,7 +15,7 @@ go_library(
     srcs = ["vsphere.go"],
     tags = ["automanaged"],
     deps = [
-        "//pkg/api:go_default_library",
+        "//pkg/api/v1:go_default_library",
         "//pkg/cloudprovider:go_default_library",
         "//pkg/types:go_default_library",
         "//pkg/util/runtime:go_default_library",
@@ -24,6 +24,8 @@ go_library(
         "//vendor:github.com/vmware/govmomi/find",
         "//vendor:github.com/vmware/govmomi/object",
         "//vendor:github.com/vmware/govmomi/property",
+        "//vendor:github.com/vmware/govmomi/session",
+        "//vendor:github.com/vmware/govmomi/vim25",
         "//vendor:github.com/vmware/govmomi/vim25/mo",
         "//vendor:github.com/vmware/govmomi/vim25/soap",
         "//vendor:github.com/vmware/govmomi/vim25/types",

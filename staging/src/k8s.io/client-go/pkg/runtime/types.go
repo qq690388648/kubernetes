@@ -25,7 +25,7 @@ package runtime
 //      runtime.TypeMeta    `json:",inline"`
 //      ... // other fields
 // }
-// func (obj *MyAwesomeAPIObject) SetGroupVersionKind(gvk *unversioned.GroupVersionKind) { unversioned.UpdateTypeMeta(obj,gvk) }; GroupVersionKind() *GroupVersionKind
+// func (obj *MyAwesomeAPIObject) SetGroupVersionKind(gvk *metav1.GroupVersionKind) { metav1.UpdateTypeMeta(obj,gvk) }; GroupVersionKind() *GroupVersionKind
 //
 // TypeMeta is provided here for convenience. You may use it directly from this package or define
 // your own with the same fields.
@@ -34,8 +34,10 @@ package runtime
 // +protobuf=true
 // +k8s:openapi-gen=true
 type TypeMeta struct {
+	// +optional
 	APIVersion string `json:"apiVersion,omitempty" yaml:"apiVersion,omitempty" protobuf:"bytes,1,opt,name=apiVersion"`
-	Kind       string `json:"kind,omitempty" yaml:"kind,omitempty" protobuf:"bytes,2,opt,name=kind"`
+	// +optional
+	Kind string `json:"kind,omitempty" yaml:"kind,omitempty" protobuf:"bytes,2,opt,name=kind"`
 }
 
 const (

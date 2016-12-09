@@ -22,11 +22,11 @@ go_library(
         "//pkg/api:go_default_library",
         "//pkg/api/install:go_default_library",
         "//pkg/api/meta:go_default_library",
-        "//pkg/api/unversioned:go_default_library",
         "//pkg/apimachinery/registered:go_default_library",
         "//pkg/apis/apps:go_default_library",
         "//pkg/apis/apps/install:go_default_library",
         "//pkg/apis/authentication/install:go_default_library",
+        "//pkg/apis/authorization:go_default_library",
         "//pkg/apis/authorization/install:go_default_library",
         "//pkg/apis/autoscaling:go_default_library",
         "//pkg/apis/autoscaling/install:go_default_library",
@@ -46,6 +46,7 @@ go_library(
         "//pkg/apis/storage:go_default_library",
         "//pkg/apis/storage/install:go_default_library",
         "//pkg/runtime:go_default_library",
+        "//pkg/runtime/schema:go_default_library",
         "//pkg/runtime/serializer/recognizer:go_default_library",
     ],
 )
@@ -56,7 +57,7 @@ go_test(
     library = "go_default_library",
     tags = ["automanaged"],
     deps = [
-        "//pkg/api/unversioned:go_default_library",
+        "//pkg/apis/meta/v1:go_default_library",
         "//pkg/runtime:go_default_library",
     ],
 )
